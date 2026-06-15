@@ -106,3 +106,35 @@ class MemoryManager:
     @staticmethod
     def _key(session_id: str) -> str:
         return f"rag:memory:{session_id}"
+
+    def clear_session(self, session_id: str) -> None:
+        """Clear conversational memory for a single session."""
+        if self._redis:
+            try:
+                self._redis.delete(self._key(session_id))
+            except Exception as exc:
+                logger.warning("Redis clear session failed for %s: %s", session_id, exc)
+        with self._lock:
+            self._memory.pop(session_id, None)
+        logger.info("Cleared memory for session: %s", session_id)
+
+    def clear_all(self) -> None:
+        """
+        Clear ALL conversational memory across all sessions.
+
+        Only removes chat history — does NOT touch document indexes,
+        Chroma database, graph store, or uploaded documents.
+        """
+        if self._redis:
+            try:
+                keys = self._redis.keys("rag:memory:*")
+                if keys:
+                    self._redis.delete(*keys)
+                    logger.info("Cleared %d Redis memory keys", len(keys))
+            except Exception as exc:
+                logger.warning("Redis clear all memory failed: %s", exc)
+        with self._lock:
+            session_count = len(self._memory)
+            self._memory.clear()
+        logger.info("Cleared in-memory chat history (%d sessions)", session_count)
+

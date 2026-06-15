@@ -12,14 +12,18 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
 from app.models import (
+    CacheEntriesResponse,
+    CacheStatus,
+    ClearResponse,
     DocumentInfo,
     EvalReport,
+    GraphNeighborsResponse,
     IngestResponse,
     QueryRequest,
     QueryResponse,
@@ -50,8 +54,8 @@ _pipeline: RAGPipeline | None = None
 async def lifespan(app: FastAPI):
     """Load pipeline on startup, release on shutdown."""
     global _pipeline
-    logger.info("Starting RAG pipeline...")
-    _pipeline = RAGPipeline()
+    logger.info("Starting RAG pipeline (downloading models in background)...")
+    _pipeline = await _run_in_thread(RAGPipeline)
 
     # Auto-ingest sample PDFs on first run — only if legal PDFs exist
     sample_dir = Path("data/pdfs")
@@ -134,32 +138,41 @@ async def query(request: QueryRequest) -> QueryResponse:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         logger.exception("Query failed: %s", exc)
-        raise HTTPException(status_code=500, detail="Internal pipeline error.")
+        return QueryResponse(
+            status="pipeline_error",
+            answer="The query pipeline hit an internal error. The root cause was captured in server logs.",
+            sources=[],
+            confidence=0.0,
+        )
 
 
 # ── Ingest ─────────────────────────────────────────────────────────────────────
+SUPPORTED_UPLOAD_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+
+
 @app.post("/ingest", response_model=IngestResponse, tags=["Documents"])
 async def ingest_document(file: UploadFile = File(...)) -> IngestResponse:
-    """Upload and ingest a PDF document into the vector store."""
+    """Upload and ingest a PDF or image document into the vector store and graph."""
     pipeline = get_pipeline()
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
+    suffix = Path(file.filename or "").suffix.lower()
+    if not file.filename or suffix not in SUPPORTED_UPLOAD_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Only PDF and image files are accepted.")
 
     # Save to temp location
     upload_dir = Path("data/uploads")
     upload_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = upload_dir / file.filename
+    document_path = upload_dir / file.filename
 
     content = await file.read()
     if len(content) > 50 * 1024 * 1024:  # 50 MB limit
         raise HTTPException(status_code=413, detail="File too large (max 50 MB).")
 
-    pdf_path.write_bytes(content)
+    document_path.write_bytes(content)
     logger.info("Received upload: %s (%d bytes)", file.filename, len(content))
 
     try:
-        result = pipeline.ingest_document(pdf_path)
+        result = pipeline.ingest_document(document_path)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
@@ -171,7 +184,7 @@ async def ingest_document(file: UploadFile = File(...)) -> IngestResponse:
     perm_path.parent.mkdir(parents=True, exist_ok=True)
     if perm_path.exists():
         perm_path.unlink()          # remove stale file before rename
-    pdf_path.rename(perm_path)
+    document_path.rename(perm_path)
 
     return result
 
@@ -190,6 +203,24 @@ async def get_document(document_name: str) -> DocumentInfo:
     if not info:
         raise HTTPException(status_code=404, detail=f"Document '{document_name}' not found.")
     return DocumentInfo(**info)
+
+
+@app.get("/entities", tags=["Graph"])
+async def search_entities(q: str, limit: int = 10) -> list[dict[str, Any]]:
+    """Search indexed entities by name or alias."""
+    pipeline = get_pipeline()
+    limit = min(max(limit, 1), 50)
+    return [entity.model_dump() for entity in pipeline._graph_store.search_entities(q, limit=limit)]
+
+
+@app.get("/entities/{entity_id}/neighbors", response_model=GraphNeighborsResponse, tags=["Graph"])
+async def entity_neighbors(entity_id: str, depth: int = 1) -> GraphNeighborsResponse:
+    """Return nearby entities and relationships from the document graph."""
+    pipeline = get_pipeline()
+    entity, neighbors, relationships = pipeline._graph_store.neighbors(entity_id, depth=depth)
+    if entity is None:
+        raise HTTPException(status_code=404, detail=f"Entity '{entity_id}' not found.")
+    return GraphNeighborsResponse(entity=entity, neighbors=neighbors, relationships=relationships)
 
 
 @app.delete("/documents/{document_name}", tags=["Documents"])
@@ -227,7 +258,7 @@ async def reset_all_documents() -> dict[str, Any]:
     for search_dir in [Path("data/pdfs"), Path("data/uploads")]:
         if search_dir.exists():
             for f in search_dir.iterdir():
-                if f.suffix.lower() == ".pdf":
+                if f.suffix.lower() in SUPPORTED_UPLOAD_SUFFIXES:
                     f.unlink()
                     files_deleted.append(f.name)
                     logger.info("Reset: deleted file %s", f)
@@ -244,11 +275,93 @@ async def reset_all_documents() -> dict[str, Any]:
     }
 
 
+# ── Cache endpoints (Features 6, 7) ──────────────────────────────────────────
+
+@app.get("/cache/status", response_model=CacheStatus, tags=["Cache"])
+async def cache_status() -> CacheStatus:
+    """
+    Get cache loading progress.
+
+    After server restart, the system loads cached answers from Redis into
+    the in-memory L2 layer.  This endpoint reports progress (0–100%)
+    and whether the cache has reached the readiness threshold.
+
+    Frontend can poll this to show "Cache loading..." and prevent
+    answering until cache is ready.
+    """
+    pipeline = get_pipeline()
+    status = pipeline._answer_cache.get_load_status()
+    return CacheStatus(**status)
+
+
+@app.get("/cache/entries", response_model=CacheEntriesResponse, tags=["Cache"])
+async def cache_entries() -> CacheEntriesResponse:
+    """
+    Get all loaded cache entries and their remaining TTL.
+    """
+    pipeline = get_pipeline()
+    entries = pipeline._answer_cache.get_all_entries()
+    return CacheEntriesResponse(entries=entries)
+
+
+@app.post("/cache/clear", response_model=ClearResponse, tags=["Cache"])
+async def clear_cache(background_tasks: BackgroundTasks) -> ClearResponse:
+    """
+    Clear ALL caches:
+      • Redis L1 cache
+      • In-memory L2 cache
+      • Semantic cache embeddings
+      • Cache statistics
+
+    Does NOT touch documents, vector store, or graph.
+    """
+    pipeline = get_pipeline()
+    try:
+        def _clear():
+            pipeline._answer_cache.clear()
+            pipeline._answer_cache.reset_stats()
+        
+        background_tasks.add_task(_clear)
+        logger.info("Cache clear triggered via API (background)")
+        return ClearResponse(success=True, detail="Cache clear started in background.")
+    except Exception as exc:
+        logger.exception("Cache clear failed to start: %s", exc)
+        return ClearResponse(success=False, detail=f"Cache clear failed to start: {exc}")
+
+
+# ── Chat clear endpoint (Feature 8) ──────────────────────────────────────────
+
+@app.post("/chat/clear", response_model=ClearResponse, tags=["Chat"])
+async def clear_chat() -> ClearResponse:
+    """
+    Clear ALL conversational memory:
+      • Chat history (all sessions)
+      • Session memory
+      • Conversation context
+
+    Does NOT delete:
+      • Chroma database
+      • Graph database
+      • Uploaded documents
+
+    Only conversational memory is removed.
+    """
+    pipeline = get_pipeline()
+    try:
+        pipeline._memory.clear_all()
+        logger.info("Chat history cleared via API")
+        return ClearResponse(success=True, detail="All chat history cleared successfully.")
+    except Exception as exc:
+        logger.exception("Chat clear failed: %s", exc)
+        return ClearResponse(success=False, detail=f"Chat clear failed: {exc}")
+
+
 # ── Debug / Diagnostics ───────────────────────────────────────────────────────
 @app.post("/debug/query", tags=["Debug"])
 async def debug_query(request: QueryRequest) -> dict:
     """
-    Debug endpoint: shows routing decision, raw retrieval chunks + scores.
+    Debug endpoint: shows routing decision, query classification,
+    raw retrieval chunks + scores.
     Use this to diagnose why a question isn't being answered correctly.
     """
     from app.pipeline import _is_keyword_presence_question, _extract_keyword
@@ -258,16 +371,26 @@ async def debug_query(request: QueryRequest) -> dict:
     is_keyword_q = _is_keyword_presence_question(request.question)
     extracted_kw = _extract_keyword(request.question) if is_keyword_q else None
 
+    # Query classification (if agent enabled)
+    classification_info = None
+    if pipeline._query_agent:
+        classification = pipeline._query_agent.classify(request.question)
+        classification_info = classification.model_dump()
+
     query_embedding = pipeline._embedding_model.embed_query(request.question)
+    graph_results, query_entity_ids = pipeline._graph_retrieve(request.question)
     retrieved = pipeline._retriever.retrieve(
         query=request.question,
         query_embedding=query_embedding,
         vector_store=pipeline._vector_store,
         top_k_final=settings.rerank_top_k,
+        graph_results=graph_results,
+        query_entity_ids=query_entity_ids,
     )
 
     return {
         "question": request.question,
+        "query_classification": classification_info,
         "routing": {
             "is_keyword_presence_question": is_keyword_q,
             "extracted_keyword": extracted_kw,
@@ -275,6 +398,7 @@ async def debug_query(request: QueryRequest) -> dict:
         },
         "total_chunks_in_store": pipeline._vector_store.count,
         "documents_in_store": pipeline.list_documents(),
+        "graph_retrieved_chunks": len(graph_results),
         "semantic_retrieved_chunks": [
             {
                 "document": c.document,

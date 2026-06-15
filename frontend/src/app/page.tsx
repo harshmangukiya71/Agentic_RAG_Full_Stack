@@ -3,11 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { api, EvalReport, QueryResponse, SourceReference } from '@/lib/api';
+import { api, CacheStatus, EvalReport, QueryResponse, SourceReference } from '@/lib/api';
 import ConfidenceBadge from '@/components/ConfidenceBadge';
 import DocumentList from '@/components/DocumentList';
 import EvalModal from '@/components/EvalModal';
 import UploadZone from '@/components/UploadZone';
+import CacheModal from '@/components/CacheModal';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -46,6 +47,8 @@ export default function Home() {
   const [evalReport, setEvalReport] = useState<EvalReport | null>(null);
   const [evalRunning, setEvalRunning] = useState(false);
   const [evalPairs, setEvalPairs] = useState(10);
+  const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
+  const [showCacheModal, setShowCacheModal] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // AbortController ref — holds the controller for the in-flight query
@@ -64,6 +67,20 @@ export default function Home() {
     api.listDocuments()
       .then(setDocuments)
       .catch(() => addToast('Could not connect to backend', 'error'));
+
+    // Check cache status
+    const checkCache = async () => {
+      try {
+        const status = await api.getCacheStatus();
+        setCacheStatus(status);
+        if (!status.is_ready) {
+          setTimeout(checkCache, 2000); // poll every 2s
+        }
+      } catch (err) {
+        console.error('Failed to get cache status', err);
+      }
+    };
+    checkCache();
   }, []);
 
   // Auto-scroll chat
@@ -216,6 +233,28 @@ export default function Home() {
     }
   };
 
+  const handleClearCache = async () => {
+    try {
+      await api.clearCache();
+      addToast('Cache cleared successfully', 'success');
+    } catch (err: unknown) {
+      addToast(`Failed to clear cache: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+    }
+  };
+
+  const handleClearChat = async () => {
+    try {
+      await api.clearChat();
+      setMessages([]);
+      addToast('Chat history cleared', 'success');
+    } catch (err: unknown) {
+      addToast(`Failed to clear chat: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+    }
+  };
+
+  const isCacheLoading = Boolean(cacheStatus && !cacheStatus.is_ready);
+  const cacheLoadingPercent = cacheStatus?.cache_loaded_percent ?? 0;
+
   return (
     <div className="app-shell">
       {/* ── Sidebar ─────────────────────────────────────────────────────────── */}
@@ -281,6 +320,23 @@ export default function Home() {
           >
             🗑️ Reset All Documents
           </button>
+          
+          <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+            <button
+              className="eval-btn"
+              onClick={handleClearCache}
+              style={{ flex: 1, padding: '6px' }}
+            >
+              🧹 Clear Cache
+            </button>
+            <button
+              className="eval-btn"
+              onClick={handleClearChat}
+              style={{ flex: 1, padding: '6px' }}
+            >
+              💬 Clear Chat
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -296,9 +352,29 @@ export default function Home() {
                 : `${documents.length} document${documents.length !== 1 ? 's' : ''} indexed`}
             </div>
           </div>
-          <div className="status-dot">
-            <div className="dot" />
-            NVIDIA NIM · Llama 3.1 70B
+          <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+            {cacheStatus && (
+              <div 
+                className="status-dot" 
+                onClick={() => setShowCacheModal(true)}
+                style={{ 
+                  background: cacheStatus.is_ready ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)', 
+                  color: cacheStatus.is_ready ? '#10b981' : '#f59e0b',
+                  padding: '4px 10px', 
+                  borderRadius: '12px',
+                  cursor: 'pointer',
+                  transition: 'background 0.2s'
+                }}
+                title="Click to view cache entries"
+              >
+                <div className="dot" style={{ background: cacheStatus.is_ready ? '#10b981' : '#f59e0b' }} />
+                Cache: {cacheStatus.is_ready ? 'Ready' : `Loading (${cacheStatus.cache_loaded_percent}%)`}
+              </div>
+            )}
+            <div className="status-dot">
+              <div className="dot" />
+              nvidia · nvidia-2.5-flash
+            </div>
           </div>
         </div>
 
@@ -370,12 +446,12 @@ export default function Home() {
               ref={textareaRef}
               id="question-input"
               className="chat-input"
-              placeholder="Ask a question about your documents… or any general question"
+              placeholder={isCacheLoading ? `Cache loading... (${cacheLoadingPercent}%)` : "Ask a question about your documents… or any general question"}
               value={question}
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
               rows={1}
-              disabled={loading}
+              disabled={loading || isCacheLoading}
             />
             {loading ? (
               /* ── Stop button (replaces send while loading) ── */
@@ -393,7 +469,7 @@ export default function Home() {
                 id="submit-question-btn"
                 className="send-btn"
                 onClick={handleSubmit}
-                disabled={loading || !question.trim()}
+                disabled={loading || isCacheLoading || !question.trim()}
                 title="Send (Enter)"
               >
                 ➤
@@ -401,10 +477,13 @@ export default function Home() {
             )}
           </div>
           <div className="input-hint">
-            {loading
-              ? <span style={{ color: '#f59e0b' }}>⏳ Generating… click ⏹ to stop</span>
-              : <>Press <kbd style={{ fontFamily: 'monospace', fontSize: 10 }}>Enter</kbd> to send · Shift+Enter for newline</>
-            }
+            {isCacheLoading ? (
+              <span style={{ color: '#f59e0b' }}>⏳ Cache is warming up. Please wait…</span>
+            ) : loading ? (
+              <span style={{ color: '#f59e0b' }}>⏳ Generating… click ⏹ to stop</span>
+            ) : (
+              <>Press <kbd style={{ fontFamily: 'monospace', fontSize: 10 }}>Enter</kbd> to send · Shift+Enter for newline</>
+            )}
           </div>
         </div>
       </main>
@@ -424,6 +503,11 @@ export default function Home() {
       {/* ── Eval Modal ──────────────────────────────────────────────────────── */}
       {evalReport && (
         <EvalModal report={evalReport} onClose={() => setEvalReport(null)} />
+      )}
+
+      {/* ── Cache Modal ─────────────────────────────────────────────────────── */}
+      {showCacheModal && (
+        <CacheModal onClose={() => setShowCacheModal(false)} />
       )}
     </div>
   );

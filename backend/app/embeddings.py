@@ -85,3 +85,29 @@ class EmbeddingModel:
     def similarity(self, vec_a: np.ndarray, vec_b: np.ndarray) -> float:
         """Cosine similarity between two L2-normalised vectors."""
         return float(np.dot(vec_a, vec_b))
+
+    # app/embeddings.py  — ADD this to your existing EmbeddingModel class
+
+_instance: "EmbeddingModel | None" = None   # module-level singleton
+
+class EmbeddingModel:
+    def __init__(self, model_name: str | None = None) -> None:
+        from sentence_transformers import SentenceTransformer
+        settings = get_settings()
+        name = model_name or settings.embedding_model
+        logger.info("Loading embedding model: %s", name)
+        self._model = SentenceTransformer(name)
+
+    @classmethod
+    def get(cls) -> "EmbeddingModel":
+        """Return the process-wide singleton (lazy init)."""
+        global _instance
+        if _instance is None:
+            _instance = cls()
+        return _instance
+
+    def embed_documents(self, texts: list[str]):
+        return self._model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+
+    def embed_query(self, text: str):
+        return self._model.encode(text, convert_to_numpy=True, show_progress_bar=False)

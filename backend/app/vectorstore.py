@@ -16,6 +16,8 @@ Elasticsearch with dense-vector plugin.
 from __future__ import annotations
 
 import logging
+import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,38 @@ from app.config import get_settings
 from app.models import Chunk, RetrievedChunk
 
 logger = logging.getLogger(__name__)
+
+_BAD_SUMMARY_MARKERS = (
+    "partial summary 1",
+    "please provide",
+    "provided \"partial summary",
+    "provided partial summary",
+    "is incomplete",
+    "i apologize",
+)
+
+
+def _is_bad_summary(summary: str | None) -> bool:
+    text = (summary or "").strip().lower()
+    if not text:
+        return True
+    return any(marker in text for marker in _BAD_SUMMARY_MARKERS)
+
+
+def _extractive_summary(documents: list[str]) -> str | None:
+    text = re.sub(r"\s+", " ", " ".join(documents)).strip()
+    if not text:
+        return None
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", text)
+        if len(sentence.strip()) > 20
+    ]
+    if not sentences:
+        return text[:1200]
+    overview = " ".join(sentences[:2]).strip()
+    bullets = "\n".join(f"- {sentence}" for sentence in (sentences[2:8] or sentences[:6]))
+    return f"{overview}\n\nKey points:\n{bullets}".strip()
 
 
 class VectorStore:
@@ -75,6 +109,10 @@ class VectorStore:
                 "chunk_index": c.chunk_index,
                 "token_count": c.token_count,
                 "summary": document_summary or "",
+                "section_title": c.section_title or "",
+                "entities": json.dumps(c.entities),
+                "ocr_confidence": c.ocr_confidence if c.ocr_confidence is not None else 1.0,
+                "extraction_method": c.extraction_method,
             }
             for c in chunks
         ]
@@ -128,8 +166,40 @@ class VectorStore:
                 chunk_index=meta["chunk_index"],
                 chunk=doc_text,
                 relevance_score=round(similarity, 4),
+                entity_matches=json.loads(meta.get("entities", "[]") or "[]"),
             ))
 
+        return retrieved
+
+    def get_chunks_by_keys(self, keys: list[tuple[str, int, int]], score: float = 0.7) -> list[RetrievedChunk]:
+        """Fetch chunks by (document, page, chunk_index), used by graph retrieval."""
+        if not keys:
+            return []
+        docs = sorted({document for document, _, _ in keys})
+        wanted_entities: dict[tuple[str, int, int], list[str]] = {}
+        for key in keys:
+            wanted_entities[(key[0], key[1], key[2])] = []
+
+        retrieved: list[RetrievedChunk] = []
+        for document in docs:
+            result = self._collection.get(where={"document": document}, include=["documents", "metadatas"])
+            for doc_text, meta in zip(result["documents"], result["metadatas"]):  # type: ignore
+                key = (meta["document"], int(meta["page"]), int(meta["chunk_index"]))
+                if key not in wanted_entities:
+                    continue
+                try:
+                    entity_matches = json.loads(meta.get("entities", "[]") or "[]")
+                except Exception:
+                    entity_matches = []
+                retrieved.append(RetrievedChunk(
+                    document=key[0],
+                    page=key[1],
+                    chunk_index=key[2],
+                    chunk=doc_text,
+                    relevance_score=score,
+                    retrieval_source="graph",
+                    entity_matches=entity_matches,
+                ))
         return retrieved
 
 
@@ -156,15 +226,27 @@ class VectorStore:
         """Return metadata summary for a specific document."""
         result = self._collection.get(
             where={"document": document_name},
-            include=["metadatas"],
+            include=["documents", "metadatas"],
         )
         if not result["metadatas"]:
             return {}
         pages = sorted({m["page"] for m in result["metadatas"]})  # type: ignore
         summaries = [m.get("summary", "") for m in result["metadatas"] if m.get("summary")]  # type: ignore
+        summary = summaries[0] if summaries else None
+        if _is_bad_summary(summary):
+            summary = _extractive_summary(result.get("documents", []) or [])  # type: ignore
+        confidences = [float(m.get("ocr_confidence", 1.0)) for m in result["metadatas"]]  # type: ignore
+        entities: set[str] = set()
+        for meta in result["metadatas"]:  # type: ignore
+            try:
+                entities.update(json.loads(meta.get("entities", "[]") or "[]"))
+            except Exception:
+                pass
         return {
             "document": document_name,
             "total_chunks": len(result["ids"]),
             "pages": pages,
-            "summary": summaries[0] if summaries else None,
+            "summary": summary,
+            "average_ocr_confidence": round(sum(confidences) / len(confidences), 3) if confidences else None,
+            "entities": sorted(entities),
         }

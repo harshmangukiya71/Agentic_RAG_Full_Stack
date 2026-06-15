@@ -7,6 +7,7 @@ during ingestion and stores the final summary as document metadata.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 from openai import OpenAI
@@ -17,6 +18,15 @@ from app.models import Chunk
 logger = logging.getLogger(__name__)
 
 _CHARS_PER_TOKEN = 4
+
+_BAD_SUMMARY_MARKERS = (
+    "partial summary 1",
+    "please provide",
+    "provided \"partial summary",
+    "provided partial summary",
+    "is incomplete",
+    "i apologize",
+)
 
 _MAP_SYSTEM_PROMPT = """You summarize document chunks for a RAG system.
 Extract the key facts, entities, dates, obligations, numbers, and conclusions.
@@ -40,8 +50,8 @@ class DocumentSummarizer:
     def __init__(self) -> None:
         self._settings = get_settings()
         self._client = OpenAI(
-            base_url=self._settings.nvidia_base_url,
-            api_key=self._settings.nvidia_api_key,
+            base_url=self._settings.gemini_base_url,
+            api_key=self._settings.gemini_api_key,
         )
 
     def summarize_chunks(self, document_name: str, chunks: list[Chunk]) -> DocumentSummary:
@@ -58,8 +68,17 @@ class DocumentSummarizer:
             return DocumentSummary(document=document_name, summary="", chunk_summaries=[])
 
         logger.info("Summarizing '%s' with %d map chunks", document_name, len(text_chunks))
-        partials = [self._summarize_single_chunk(text, i + 1, len(text_chunks)) for i, text in enumerate(text_chunks)]
+        partials = [
+            self._summarize_single_chunk(text, i + 1, len(text_chunks))
+            for i, text in enumerate(text_chunks)
+        ]
         final_summary = self._combine_summaries(document_name, partials)
+        if self._is_bad_summary(final_summary):
+            logger.warning(
+                "LLM reduce summary for %s was unusable; using extractive summary.",
+                document_name,
+            )
+            final_summary = self._extractive_document_summary(full_text)
         return DocumentSummary(document=document_name, summary=final_summary, chunk_summaries=partials)
 
     def _split_text(self, text: str, max_tokens: int, overlap_tokens: int) -> list[str]:
@@ -98,13 +117,13 @@ class DocumentSummarizer:
 
     def _chat(self, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
         response = self._client.chat.completions.create(
-            model=self._settings.nvidia_model,
+            model=self._settings.gemini_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=max_tokens,
-            temperature=self._settings.nvidia_temperature,
+            temperature=self._settings.gemini_temperature,
             stream=False,
         )
         return (response.choices[0].message.content or "").strip()
@@ -114,10 +133,23 @@ class DocumentSummarizer:
             f"Summarize chunk {index} of {total}. Focus on durable document facts.\n\n"
             f"CHUNK:\n{text}"
         )
-        return self._chat(_MAP_SYSTEM_PROMPT, prompt, self._settings.summary_max_tokens_per_chunk)
+        try:
+            summary = self._chat(_MAP_SYSTEM_PROMPT, prompt, self._settings.summary_max_tokens_per_chunk)
+        except Exception as exc:
+            logger.warning(
+                "LLM chunk summary failed for chunk %d/%d: %s", index, total, exc
+            )
+            return self._extractive_chunk_summary(text)
+        if self._is_bad_summary(summary):
+            return self._extractive_chunk_summary(text)
+        return summary
 
     def _combine_summaries(self, document_name: str, summaries: list[str]) -> str:
-        joined = "\n\n".join(f"Partial summary {i + 1}:\n{s}" for i, s in enumerate(summaries))
+        usable = [s for s in summaries if s.strip() and not self._is_bad_summary(s)]
+        if not usable:
+            return ""
+
+        joined = "\n\n".join(f"Partial summary {i + 1}:\n{s}" for i, s in enumerate(usable))
         prompt = (
             f"Document: {document_name}\n\n"
             "Combine these partial summaries into a final document summary with:\n"
@@ -126,4 +158,35 @@ class DocumentSummarizer:
             "- notable dates/numbers/parties when present\n\n"
             f"{joined}"
         )
-        return self._chat(_REDUCE_SYSTEM_PROMPT, prompt, self._settings.summary_final_max_tokens)
+        try:
+            return self._chat(_REDUCE_SYSTEM_PROMPT, prompt, self._settings.summary_final_max_tokens)
+        except Exception as exc:
+            logger.warning("LLM reduce summary failed for %s: %s", document_name, exc)
+            return "\n".join(usable[:6])
+
+    def _is_bad_summary(self, summary: str) -> bool:
+        text = (summary or "").strip().lower()
+        if len(text) < 20:
+            return True
+        return any(marker in text for marker in _BAD_SUMMARY_MARKERS)
+
+    def _extractive_chunk_summary(self, text: str) -> str:
+        sentences = self._split_sentences(text)
+        if not sentences:
+            return text[:600].strip()
+        return " ".join(sentences[:4]).strip()
+
+    def _extractive_document_summary(self, text: str) -> str:
+        sentences = self._split_sentences(text)
+        if not sentences:
+            return text[:1200].strip()
+
+        overview = " ".join(sentences[:2]).strip()
+        key_points = sentences[2:8] or sentences[:6]
+        bullets = "\n".join(f"- {sentence}" for sentence in key_points)
+        return f"{overview}\n\nKey points:\n{bullets}".strip()
+
+    def _split_sentences(self, text: str) -> list[str]:
+        normalized = re.sub(r"\s+", " ", text).strip()
+        sentences = re.split(r"(?<=[.!?])\s+", normalized)
+        return [s.strip() for s in sentences if len(s.strip()) > 20]

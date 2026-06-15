@@ -1,5 +1,5 @@
 """
-generation.py — LLM generation via NVIDIA NIM with hallucination mitigation.
+generation.py — LLM generation via Gemini with hallucination mitigation.
 
 Hallucination mitigation (multi-layered):
   1. Context-only system prompt: LLM is explicitly forbidden from using external knowledge.
@@ -23,9 +23,107 @@ from typing import Sequence
 from openai import OpenAI
 
 from app.config import get_settings
-from app.models import QueryResponse, RetrievedChunk, SourceReference
+from app.models import QueryResponse, ReasoningOutput, RetrievedChunk, SourceReference
 
 logger = logging.getLogger(__name__)
+
+
+def _is_llm_capacity_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "429",
+            "rate limit",
+            "quota",
+            "resource_exhausted",
+            "too many requests",
+        )
+    )
+
+
+def _format_number(value) -> str:
+    if isinstance(value, (int, float)):
+        if float(value).is_integer():
+            return f"{int(value):,}"
+        return f"{value:,.2f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+def _build_sources(chunks: list[RetrievedChunk]) -> list[SourceReference]:
+    return [
+        SourceReference(
+            document=chunk.document,
+            page=chunk.page,
+            chunk=chunk.chunk,
+            chunk_index=chunk.chunk_index,
+            entities=chunk.entity_matches,
+        )
+        for chunk in chunks
+    ]
+
+
+def _deterministic_reasoning_answer(
+    reasoning_output: ReasoningOutput | None,
+    context_chunks: list[RetrievedChunk],
+) -> QueryResponse | None:
+    if not reasoning_output:
+        return None
+
+    if reasoning_output.rankings:
+        lines = ["Ranked results from extracted document evidence:"]
+        for item in reasoning_output.rankings:
+            entity = item.get("entity") or item.get("text", "Item")
+            metric = item.get("metric") or "value"
+            value = item.get("value", item.get("year", ""))
+            suffix = ""
+            if item.get("chunk_document") and item.get("chunk_page"):
+                suffix = f" ({item['chunk_document']}, page {item['chunk_page']})"
+            lines.append(
+                f"{item.get('rank', len(lines))}. {entity}: "
+                f"{_format_number(value)} {metric}{suffix}"
+            )
+        return QueryResponse(
+            answer="\n".join(lines),
+            sources=_build_sources(context_chunks),
+            confidence=0.75 if reasoning_output.evidence_sufficient else 0.45,
+        )
+
+    if reasoning_output.calculations:
+        lines = ["Calculated results from extracted document evidence:"]
+        for calc in reasoning_output.calculations:
+            if calc.get("operation") == "numeric_filter":
+                records = calc.get("records", [])
+                if not records:
+                    lines.append("No records matched the numeric filter.")
+                else:
+                    metric = calc.get("metric", "value")
+                    for record in records:
+                        lines.append(
+                            f"- {record['entity']}: "
+                            f"{_format_number(record['value'])} {metric}"
+                        )
+            elif calc.get("operation") == "summary_stats":
+                metric = calc.get("metric", "metric")
+                lines.append(
+                    f"{metric}: sum={_format_number(calc.get('sum'))}, "
+                    f"average={_format_number(calc.get('average'))}, "
+                    f"min={_format_number(calc.get('min'))}, "
+                    f"max={_format_number(calc.get('max'))}, "
+                    f"count={_format_number(calc.get('count'))}"
+                )
+            elif "result" in calc:
+                lines.append(
+                    f"{calc.get('metric', calc.get('operation', 'result'))}: "
+                    f"{_format_number(calc['result'])}"
+                )
+        return QueryResponse(
+            answer="\n".join(lines),
+            sources=_build_sources(context_chunks),
+            confidence=0.7 if reasoning_output.evidence_sufficient else 0.4,
+        )
+
+    return None
 
 # ── System prompt (RAG mode) ─────────────────────────────────────────────────
 _SYSTEM_PROMPT = """You are a helpful, precise document assistant. Your job is to answer questions
@@ -44,7 +142,7 @@ _FALLBACK_SYSTEM_PROMPT = """You are a helpful, knowledgeable assistant. Answer 
 clearly and accurately using your general knowledge. Be concise, factual, and friendly.
 If the question is ambiguous, state your assumptions briefly."""
 
-_CONTEXT_TEMPLATE = """DOCUMENT EXCERPTS:
+_CONTEXT_TEMPLATE = """{structured_context}DOCUMENT EXCERPTS:
 {context}
 
 {history_block}
@@ -66,6 +164,21 @@ def _build_context(chunks: list[RetrievedChunk]) -> str:
             f"{chunk.chunk}"
         )
     return "\n\n---\n\n".join(parts)
+
+
+def _build_structured_context(reasoning_output: ReasoningOutput | None) -> str:
+    if not reasoning_output:
+        return ""
+
+    if not (reasoning_output.calculations or reasoning_output.rankings):
+        return ""
+
+    return (
+        "REASONING RESULTS (pre-computed from document evidence):\n"
+        f"{reasoning_output.summary}\n\n"
+        "Use these pre-computed results as primary evidence. "
+        "Cross-check against the excerpts below.\n\n"
+    )
 
 
 def _token_overlap_score(answer: str, context: str) -> float:
@@ -114,14 +227,15 @@ def generate_answer(
     retrieved_chunks: list[RetrievedChunk],
     top_k_context: int | None = None,
     conversation_history: str = "",
+    reasoning_output: ReasoningOutput | None = None,
 ) -> QueryResponse:
     """
-    Generate an answer grounded in retrieved_chunks using NVIDIA NIM.
+    Generate an answer grounded in retrieved_chunks using Gemini.
 
     Steps:
       1. Check if top chunk relevance >= threshold; refuse if not.
       2. Build context from top-k retrieved chunks.
-      3. Call NVIDIA NIM (OpenAI-compatible API).
+      3. Call Gemini (OpenAI-compatible API).
       4. Compute confidence score.
       5. Return structured QueryResponse.
     """
@@ -150,38 +264,61 @@ def generate_answer(
 
     # ── Step 2: Build context ─────────────────────────────────────────────
     context_text = _build_context(context_chunks)
+    structured_context = _build_structured_context(reasoning_output)
     history_block = _HISTORY_TEMPLATE.format(history=conversation_history) if conversation_history else ""
     user_content = _CONTEXT_TEMPLATE.format(
+        structured_context=structured_context,
         context=context_text,
         history_block=history_block,
         question=question,
     )
 
-    # ── Step 3: Call NVIDIA NIM ───────────────────────────────────────────
+    # ── Step 3: Call Gemini ───────────────────────────────────────────────
     client = OpenAI(
-        base_url=settings.nvidia_base_url,
-        api_key=settings.nvidia_api_key,
+        base_url=settings.gemini_base_url,
+        api_key=settings.gemini_api_key,
     )
 
     try:
         response = client.chat.completions.create(
-            model=settings.nvidia_model,
+            model=settings.gemini_model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            max_tokens=settings.nvidia_max_tokens,
-            temperature=settings.nvidia_temperature,
+            max_tokens=settings.gemini_max_tokens,
+            temperature=settings.gemini_temperature,
             stream=False,
         )
         raw_answer = response.choices[0].message.content or ""
     except Exception as exc:
-        logger.exception("NVIDIA NIM API call failed: %s", exc)
+        logger.exception("Gemini API call failed: %s", exc)
+        deterministic = _deterministic_reasoning_answer(
+            reasoning_output, context_chunks
+        )
+        if deterministic:
+            if _is_llm_capacity_error(exc):
+                deterministic.answer += (
+                    "\n\nNote: the LLM provider is currently rate-limited, "
+                    "so this answer was generated from the local reasoning "
+                    "extractor instead of the final LLM step."
+                )
+            return deterministic
+        if _is_llm_capacity_error(exc):
+            return QueryResponse(
+                answer=(
+                    "The LLM provider is currently rate-limited or out of quota, "
+                    "so I could not generate the final answer. Please retry after "
+                    "the quota window resets."
+                ),
+                sources=_build_sources(context_chunks),
+                confidence=0.0,
+            )
         raise
 
     # ── Step 4: Confidence scoring ────────────────────────────────────────
     top_relevance = context_chunks[0].relevance_score
-    overlap = _token_overlap_score(raw_answer, context_text)
+    overlap = _token_overlap_score(raw_answer, structured_context + context_text)
     confidence = _compute_confidence(top_relevance, overlap, settings)
 
     # Append caveat if confidence is low
@@ -192,14 +329,7 @@ def generate_answer(
         )
 
     # ── Step 5: Build structured response ────────────────────────────────
-    sources = [
-        SourceReference(
-            document=chunk.document,
-            page=chunk.page,
-            chunk=chunk.chunk,
-        )
-        for chunk in context_chunks
-    ]
+    sources = _build_sources(context_chunks)
 
     return QueryResponse(
         answer=raw_answer.strip(),
@@ -219,7 +349,7 @@ def generate_llm_fallback(question: str, conversation_history: str = "") -> Quer
     The response is clearly labelled so the user knows it's not grounded in their docs.
     """
     settings = get_settings()
-    client = OpenAI(base_url=settings.nvidia_base_url, api_key=settings.nvidia_api_key)
+    client = OpenAI(base_url=settings.gemini_base_url, api_key=settings.gemini_api_key)
 
     logger.info("LLM fallback: answering '%s' from general knowledge", question[:80])
 
@@ -233,12 +363,12 @@ def generate_llm_fallback(question: str, conversation_history: str = "") -> Quer
             )
 
         response = client.chat.completions.create(
-            model=settings.nvidia_model,
+            model=settings.gemini_model,
             messages=[
                 {"role": "system", "content": _FALLBACK_SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            max_tokens=settings.nvidia_max_tokens,
+            max_tokens=settings.gemini_max_tokens,
             temperature=0.4,   # slightly warmer for general Q&A
             stream=False,
         )

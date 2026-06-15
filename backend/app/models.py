@@ -1,61 +1,139 @@
 """
-models.py — shared Pydantic schemas used across the API.
+models.py - shared Pydantic schemas used across the API.
 """
 from __future__ import annotations
-from typing import Optional
+
+from typing import Any, Optional
+
 from pydantic import BaseModel, Field
 
 
-# ── Internal data structures ────────────────────────────────────────────────
-
 class Chunk(BaseModel):
     """A single text chunk with full provenance metadata."""
-    document: str               # original filename (e.g. "NDA-VendorX.pdf")
-    page: int                   # 1-indexed page number
-    chunk_index: int            # position within the document
-    text: str                   # the raw chunk text
-    token_count: int            # approximate BPE token count
+
+    document: str
+    page: int
+    chunk_index: int
+    text: str
+    token_count: int
+    section_title: Optional[str] = None
+    entities: list[str] = Field(default_factory=list)
+    kg_relations: list[dict[str, Any]] = Field(default_factory=list)
+    ocr_confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    extraction_method: str = "native"
 
 
 class RetrievedChunk(BaseModel):
     """A chunk augmented with a relevance score after retrieval/re-ranking."""
+
     document: str
     page: int
     chunk_index: int
-    chunk: str                  # alias: text content
-    relevance_score: float      # 0–1, higher = more relevant
+    chunk: str
+    relevance_score: float
+    retrieval_source: str = "hybrid"
+    entity_matches: list[str] = Field(default_factory=list)
 
 
-# ── API request / response ──────────────────────────────────────────────────
+class OCRBlock(BaseModel):
+    text: str
+    bbox: list[float] = Field(default_factory=list)
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+
+
+class OCRPage(BaseModel):
+    document_id: str
+    page_number: int
+    raw_text: str
+    ocr_confidence: float = Field(1.0, ge=0.0, le=1.0)
+    blocks: list[OCRBlock] = Field(default_factory=list)
+    extraction_method: str = "native"
+
+
+class EntityMention(BaseModel):
+    entity_id: str
+    text: str
+    label: str
+    normalized: str
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    document: Optional[str] = None
+    page: Optional[int] = None
+    chunk_index: Optional[int] = None
+    start_char: Optional[int] = None
+    end_char: Optional[int] = None
+
+
+class GraphEntity(BaseModel):
+    entity_id: str
+    label: str
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GraphRelationship(BaseModel):
+    source_id: str
+    target_id: str
+    type: str
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
 
 class QueryRequest(BaseModel):
-    question: str = Field(..., min_length=5, max_length=2000,
-                          description="The user's natural-language question.")
-    top_k: Optional[int] = Field(None, ge=1, le=10,
-                                 description="Override default context chunks (default=5).")
-    session_id: Optional[str] = Field(None, max_length=128,
-                                      description="Stable chat session id for conversational memory.")
+    question: str = Field(..., min_length=5, max_length=2000)
+    top_k: Optional[int] = Field(None, ge=1, le=10)
+    session_id: Optional[str] = Field(None, max_length=128)
 
 
 class SourceReference(BaseModel):
-    document: str               # filename / document title
-    page: int                   # page number
-    chunk: str                  # the retrieved text chunk used
+    document: str
+    page: int
+    chunk: str
+    chunk_index: Optional[int] = None
+    entities: list[str] = Field(default_factory=list)
+
+
+class QueryClassification(BaseModel):
+    """Output of the query planning agent."""
+    query_type: str = "LOOKUP"
+    query_scope: str = "LOCAL"
+    retrieval_strategy: str = "hybrid"
+    top_k: int = 5
+    reasoning_hints: list[str] = Field(default_factory=list)
+
+
+class ReasoningOutput(BaseModel):
+    """Structured evidence produced by the reasoning agent."""
+    entities: list[dict[str, Any]] = Field(default_factory=list)
+    relationships: list[dict[str, Any]] = Field(default_factory=list)
+    calculations: list[dict[str, Any]] = Field(default_factory=list)
+    rankings: list[dict[str, Any]] = Field(default_factory=list)
+    summary: str = ""
+    evidence_sufficient: bool = True
+    reasoning_steps: list[str] = Field(default_factory=list)
+    missing_entities: list[str] = Field(default_factory=list)
+    missing_relationships: list[str] = Field(default_factory=list)
+    recommended_action: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
+    status: str = "success"
     answer: str
     sources: list[SourceReference]
     confidence: float = Field(..., ge=0.0, le=1.0)
+    query_classification: Optional[QueryClassification] = None
 
-
-# ── Ingestion ───────────────────────────────────────────────────────────────
 
 class IngestResponse(BaseModel):
     document: str
     pages_processed: int
     chunks_created: int
     summary: Optional[str] = None
+    extraction_method: str = "native"
+    average_ocr_confidence: Optional[float] = None
+    entities_extracted: int = 0
+    graph_relationships_created: int = 0
     status: str = "success"
 
 
@@ -64,9 +142,15 @@ class DocumentInfo(BaseModel):
     total_chunks: int
     pages: list[int]
     summary: Optional[str] = None
+    average_ocr_confidence: Optional[float] = None
+    entities: list[str] = Field(default_factory=list)
 
 
-# ── Evaluation ──────────────────────────────────────────────────────────────
+class GraphNeighborsResponse(BaseModel):
+    entity: GraphEntity | None = None
+    neighbors: list[GraphEntity] = Field(default_factory=list)
+    relationships: list[GraphRelationship] = Field(default_factory=list)
+
 
 class EvalPair(BaseModel):
     question: str
@@ -79,27 +163,51 @@ class EvalResult(BaseModel):
     question: str
     expected_document: str
     expected_page: int
-    retrieved_top5: list[dict]          # top-5 retrieved chunks with scores
-    hit_at_1: bool                      # correct chunk is rank 1
-    hit_at_3: bool                      # correct chunk in top 3
-    hit_at_5: bool                      # correct chunk in top 5
-    rank: int                           # rank of correct result (0 = not found)
-    reciprocal_rank: float              # 1/rank, or 0.0 if not found
+    retrieved_top5: list[dict]
+    hit_at_1: bool
+    hit_at_3: bool
+    hit_at_5: bool
+    rank: int
+    reciprocal_rank: float
 
 
 class EvalReport(BaseModel):
     total_questions: int
-    # ── Hit counts ──────────────────────────────────────────────────────────
     hits_at_1: int
     hits_at_3: int
     hits_at_5: int
-    # ── Recall@K (fraction of questions where correct chunk is in top K) ────
     recall_at_1: float
     recall_at_3: float
     recall_at_5: float
-    # ── MRR (Mean Reciprocal Rank) ───────────────────────────────────────────
     mrr: float
-    # ── Legacy alias kept for backward compat ───────────────────────────────
-    precision_at_3: float               # = recall_at_3 for single-answer QA
-    hits: int                           # = hits_at_3
+    precision_at_3: float
+    hits: int
     results: list[EvalResult]
+
+
+class CacheStatus(BaseModel):
+    """Cache loading progress after server restart."""
+    cache_loaded_percent: int = 0
+    is_ready: bool = False
+    redis_available: bool = False
+    total_entries: int = 0
+    loaded_entries: int = 0
+
+
+class CacheEntry(BaseModel):
+    """A single cache entry for inspection."""
+    question: str
+    answer_preview: str
+    ttl_seconds: int
+    hits: int
+
+
+class CacheEntriesResponse(BaseModel):
+    """Response containing multiple cache entries."""
+    entries: list[CacheEntry]
+
+
+class ClearResponse(BaseModel):
+    """Generic response for clear operations."""
+    success: bool = True
+    detail: str = ""
