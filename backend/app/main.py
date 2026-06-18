@@ -58,26 +58,26 @@ async def lifespan(app: FastAPI):
     _pipeline = await _run_in_thread(RAGPipeline)
 
     # Auto-ingest sample PDFs on first run — only if legal PDFs exist
-    sample_dir = Path("data/pdfs")
-    if sample_dir.exists() and _pipeline.list_documents() == []:
-        # Only auto-ingest if the directory has the expected legal PDF files
-        legal_pdfs = [
-            sample_dir / "NDA-VendorX.pdf",
-            sample_dir / "SLA-ProviderY.pdf",
-            sample_dir / "IP-ContractorZ.pdf",
-        ]
-        has_legal_pdfs = any(p.exists() for p in legal_pdfs)
-        if has_legal_pdfs:
-            logger.info("Auto-ingesting legal sample PDFs from %s", sample_dir)
-            results = _pipeline.ingest_directory(sample_dir)
-            for r in results:
-                logger.info("  Auto-ingested: %s (%d chunks)", r.document, r.chunks_created)
-        else:
-            logger.info(
-                "Skipping auto-ingest: no legal PDFs found in %s. "
-                "Run 'python generate_sample_pdfs.py' inside /backend to create them.",
-                sample_dir,
-            )
+    # sample_dir = Path("data/pdfs")
+    # if sample_dir.exists() and _pipeline.list_documents() == []:
+    #     # Only auto-ingest if the directory has the expected legal PDF files
+    #     legal_pdfs = [
+    #         sample_dir / "NDA-VendorX.pdf",
+    #         sample_dir / "SLA-ProviderY.pdf",
+    #         sample_dir / "IP-ContractorZ.pdf",
+    #     ]
+    #     has_legal_pdfs = any(p.exists() for p in legal_pdfs)
+    #     if has_legal_pdfs:
+    #         logger.info("Auto-ingesting legal sample PDFs from %s", sample_dir)
+    #         results = _pipeline.ingest_directory(sample_dir)
+    #         for r in results:
+    #             logger.info("  Auto-ingested: %s (%d chunks)", r.document, r.chunks_created)
+    #     else:
+    #         logger.info(
+    #             "Skipping auto-ingest: no legal PDFs found in %s. "
+    #             "Run 'python generate_sample_pdfs.py' inside /backend to create them.",
+    #             sample_dir,
+    #         )
 
     logger.info("Pipeline ready. Documents: %s", _pipeline.list_documents())
     yield
