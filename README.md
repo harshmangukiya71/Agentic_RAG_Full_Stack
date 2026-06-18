@@ -105,80 +105,80 @@ https://agenticragfullstack-production.up.railway.app/docs
 =================================================================================
 
 
-┌───────────────────────────┐
-│ PDF / Image / Screenshot  │
-└─────────────┬─────────────┘
-              │
-              ▼
-┌───────────────────────────┐
-│ PyMuPDF Text Extraction   │
-└─────────────┬─────────────┘
-              │
-      Enough Native Text?
-          ┌───┴───┐
-          │       │
-         Yes      No
-          │       │
-          ▼       ▼
-┌──────────────┐  ┌─────────────────────┐
-│ Clean Text   │  │ OCR Pipeline        │
-│ Processing   │  │ PaddleOCR           │
-└──────┬───────┘  │ Tesseract Fallback  │
-       │          └──────────┬──────────┘
-       └──────────┬──────────┘
-                  │
-                  ▼
-┌───────────────────────────┐
-│ Semantic Chunking         │
-│ 512 Tokens + Overlap      │
-└─────────────┬─────────────┘
-              │
-              ▼
-┌───────────────────────────┐
-│ Metadata Enrichment       │
-│                           │
-│ • Page Number             │
-│ • Section                 │
-│ • OCR Confidence          │
-│ • Extraction Method       │
-└─────────────┬─────────────┘
-              │
-              ▼
-┌───────────────────────────┐
-│ Entity & Relation         │
-│ Extraction using LLM      │
-└─────────────┬─────────────┘
-              │
-              ▼
-┌───────────────────────────┐
-│ Entity Normalization      │
-│ & Deduplication           │
-└───────┬─────────┬─────────┘
-        │         │
-        ▼         ▼
-┌────────────┐ ┌────────────┐
-│ Embeddings │ │ Neo4j      │
-│ BGE Large  │ │ Knowledge  │
-│            │ │ Graph      │
-└─────┬──────┘ └─────┬──────┘
-      │              │
-      ▼              ▼
-┌────────────┐ ┌────────────┐
-│ ChromaDB   │ │ Entity     │
-│ Vector DB  │ │ Relations  │
-└─────┬──────┘ └─────┬──────┘
-      │              │
-      └──────┬───────┘
-             ▼
-┌───────────────────────────┐
-│ BM25 Index Construction   │
-└─────────────┬─────────────┘
-              │
-              ▼
-┌───────────────────────────┐
-│ Hybrid Retrieval Ready    │
-│ Knowledge Corpus          │
-└───────────────────────────┘
+                    ┌───────────────────────────┐
+                    │ PDF / Image / Screenshot  │
+                    └─────────────┬─────────────┘
+                                  │
+                                  ▼
+                    ┌───────────────────────────┐
+                    │ PyMuPDF Text Extraction   │
+                    └─────────────┬─────────────┘
+                                  │
+                          Enough Native Text?
+                              ┌───┴───┐
+                              │       │
+                             Yes      No
+                              │       │
+                              ▼       ▼
+                    ┌──────────────┐  ┌─────────────────────┐
+                    │ Clean Text   │  │ OCR Pipeline        │
+                    │ Processing   │  │ PaddleOCR           │
+                    └──────┬───────┘  │ Tesseract Fallback  │
+                           │          └──────────┬──────────┘
+                           └──────────┬──────────┘
+                                      │
+                                      ▼
+                    ┌───────────────────────────┐
+                    │ Semantic Chunking         │
+                    │ 512 Tokens + Overlap      │
+                    └─────────────┬─────────────┘
+                                  │
+                                  ▼
+                    ┌───────────────────────────┐
+                    │ Metadata Enrichment       │
+                    │                           │
+                    │ • Page Number             │
+                    │ • Section                 │
+                    │ • OCR Confidence          │
+                    │ • Extraction Method       │
+                    └─────────────┬─────────────┘
+                                  │
+                                  ▼
+                    ┌───────────────────────────┐
+                    │ Entity & Relation         │
+                    │ Extraction using LLM      │
+                    └─────────────┬─────────────┘
+                                  │
+                                  ▼
+                    ┌───────────────────────────┐
+                    │ Entity Normalization      │
+                    │ & Deduplication           │
+                    └───────┬─────────┬─────────┘
+                            │         │
+                            ▼         ▼
+                    ┌────────────┐ ┌────────────┐
+                    │ Embeddings │ │ Neo4j      │
+                    │ BGE Large  │ │ Knowledge  │
+                    │            │ │ Graph      │
+                    └─────┬──────┘ └─────┬──────┘
+                          │              │
+                          ▼              ▼
+                    ┌────────────┐ ┌────────────┐
+                    │ ChromaDB   │ │ Entity     │
+                    │ Vector DB  │ │ Relations  │
+                    └─────┬──────┘ └─────┬──────┘
+                          │              │
+                          └──────┬───────┘
+                                 ▼
+                    ┌───────────────────────────┐
+                    │ BM25 Index Construction   │
+                    └─────────────┬─────────────┘
+                                  │
+                                  ▼
+                    ┌───────────────────────────┐
+                    │ Hybrid Retrieval Ready    │
+                    │ Knowledge Corpus          │
+                    └───────────────────────────┘
 
 ## What This Project Uses
 
