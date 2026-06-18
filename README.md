@@ -1,5 +1,15 @@
 # DocRAG - Hybrid Agentic RAG Assistant
 
+## Live Demo
+
+Frontend:
+https://agentic-rag-full-stack-31x3rxy8y.vercel.app/
+
+Backend API:
+https://agenticragfullstack-production.up.railway.app/docs
+
+
+
 ## Architecture
 
 ```text
@@ -263,59 +273,35 @@ These classifications control whether the system leans more on exact metadata, d
 Create `backend/.env` from `backend/.env.example`.
 
 ```env
-NVIDIA_API_KEY=your-nvidia-api-key-here
+NVIDIA_API_KEY=nvapi-------
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
 NVIDIA_MODEL=meta/llama-3.3-70b-instruct
+NVIDIA_EMBEDDING_MODEL=nvidia/nv-embed-v1
 NVIDIA_MAX_TOKENS=1024
 NVIDIA_TEMPERATURE=0.1
 
-EMBEDDING_MODEL=BAAI/bge-large-en-v1.5
-EMBEDDING_DEVICE=cpu
-
-CHROMA_PERSIST_DIR=./data/chroma_db
-COLLECTION_NAME=legal_docs
-
 GRAPH_BACKEND=neo4j
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=password
-NEO4J_DATABASE=neo4j
 
-REDIS_URL=redis://localhost:6379/0
+NEO4J_URI=neo4j+s://52f6fec6.databases.neo4j.io
+NEO4J_USERNAME=52f6fec6
+NEO4J_PASSWORD=7XcwEdmn1upF-Is02B7GiUgLVeq4lltV8Me33TTjkUc
+NEO4J_DATABASE=52f6fec6
+AURA_INSTANCEID=52f6fec6
+AURA_INSTANCENAME=Free instance
+
+
+# Agentic RAG settings
+QUERY_AGENT_ENABLED=true
+REASONING_AGENT_ENABLED=true
+MAX_RETRIEVAL_ITERATIONS=3
+CACHE_LOAD_MONITORING=true
+CACHE_READY_PERCENT=100
+
+#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
 ```
 
 Neo4j is required because `GRAPH_BACKEND` is configured for Neo4j only. Redis is optional; if Redis is unavailable, the app falls back to in-memory and local disk caching where supported.
 
-## Run Locally
-
-### Backend
-
-```bash
-cd backend
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
-
-Backend URL:
-
-```text
-http://localhost:8000
-```
-
-### Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Frontend URL:
-
-```text
-http://localhost:3000
 ```
 
 ## Docker
