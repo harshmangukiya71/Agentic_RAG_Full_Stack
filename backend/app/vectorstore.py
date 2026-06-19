@@ -118,12 +118,20 @@ class VectorStore:
                 sparse_vectors_config=self._client.get_fastembed_sparse_vector_params() if hasattr(self._client, 'get_fastembed_sparse_vector_params') else None
             )
             
-            logger.info("Creating payload index for 'document' field")
-            self._client.create_payload_index(
-                collection_name=self._collection_name,
-                field_name="document",
-                field_schema=PayloadSchemaType.KEYWORD,
-            )
+        # Ensure payload indexes exist (idempotent / IF NOT EXISTS)
+        try:
+            info = self._client.get_collection(self._collection_name)
+            existing_indexes = set(info.payload_schema.keys()) if info.payload_schema else set()
+            for field in ["document", "source", "page", "chunk_id"]:
+                if field not in existing_indexes:
+                    logger.info("Creating payload index for '%s' field", field)
+                    self._client.create_payload_index(
+                        collection_name=self._collection_name,
+                        field_name=field,
+                        field_schema=PayloadSchemaType.KEYWORD,
+                    )
+        except Exception as e:
+            logger.warning("Failed to verify/create payload indexes: %s", e)
         
         self._dense_vector_name = None
         try:
