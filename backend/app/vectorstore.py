@@ -7,13 +7,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-import chromadb
-from chromadb.config import Settings as ChromaSettings
-
 try:
-    from pinecone import Pineconee
-except ImportError:  # pragma: no cover - Pinecone may be unused locally.
-    Pinecone = None  # type: ignore[assignment]
+    from pinecone import Pinecone
+except ImportError:
+    Pinecone = None
 
 from app.config import get_settings
 from app.models import Chunk, RetrievedChunk
