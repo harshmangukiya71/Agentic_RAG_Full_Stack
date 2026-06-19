@@ -10,7 +10,7 @@ import uuid
 
 try:
     from qdrant_client import QdrantClient
-    from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, MatchAny
+    from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, MatchAny, PayloadSchemaType
 except ImportError:
     QdrantClient = None
 
@@ -116,6 +116,13 @@ class VectorStore:
                 collection_name=self._collection_name,
                 vectors_config=VectorParams(size=4096, distance=Distance.COSINE),
                 sparse_vectors_config=self._client.get_fastembed_sparse_vector_params() if hasattr(self._client, 'get_fastembed_sparse_vector_params') else None
+            )
+            
+            logger.info("Creating payload index for 'document' field")
+            self._client.create_payload_index(
+                collection_name=self._collection_name,
+                field_name="document",
+                field_schema=PayloadSchemaType.KEYWORD,
             )
         
         self._dense_vector_name = None
@@ -235,11 +242,11 @@ class VectorStore:
 
         if self._backend == "qdrant":
             if self._dense_vector_name:
-                query_kwargs = {"query_vector": (self._dense_vector_name, query_embedding)}
+                query_kwargs = {"query": query_embedding, "using": self._dense_vector_name}
             else:
-                query_kwargs = {"query_vector": query_embedding}
+                query_kwargs = {"query": query_embedding}
                 
-            search_result = self._client.search(
+            search_result = self._client.query_points(
                 collection_name=self._collection_name,
                 **query_kwargs,
                 limit=min(top_k, count),
@@ -248,7 +255,7 @@ class VectorStore:
             )
             
             retrieved: list[RetrievedChunk] = []
-            for hit in search_result:
+            for hit in search_result.points:
                 meta = hit.payload or {}
                 # Qdrant cosine similarity returns values where higher is more similar
                 similarity = hit.score 
