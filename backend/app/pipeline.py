@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import json
 import re
+import time
 from hashlib import sha256
 from pathlib import Path
 from typing import Optional
@@ -51,6 +52,7 @@ from app.models import (
     SourceReference,
 )
 from app.query_agent import QueryPlanningAgent
+from app.query_rewriter import QueryRewriter
 from app.reasoning_agent import ReasoningAgent
 from app.retrieval import HybridRetriever
 from app.summarizer import DocumentSummarizer
@@ -205,6 +207,7 @@ class RAGPipeline:
         self._answer_cache = AnswerCache()
         self._entity_extractor = EntityExtractor()
         self._graph_store: GraphStore = create_graph_store()
+        self._query_rewriter = QueryRewriter() if self._settings.query_rewriter_enabled else None
 
         # ── Agentic components (Feature 1, 3) ─────────────────────────────────
         self._query_agent = QueryPlanningAgent() if self._settings.query_agent_enabled else None
@@ -213,8 +216,9 @@ class RAGPipeline:
         self._rebuild_bm25_from_store()
         logger.info(
             "RAGPipeline initialised — %d chunks in store | "
-            "query_agent=%s reasoning_agent=%s",
+            "query_rewriter=%s query_agent=%s reasoning_agent=%s",
             self._vector_store.count,
+            "ON" if self._query_rewriter else "OFF",
             "ON" if self._query_agent else "OFF",
             "ON" if self._reasoning_agent else "OFF",
         )
@@ -334,9 +338,26 @@ class RAGPipeline:
         if not question or not question.strip():
             raise ValueError("Question cannot be empty.")
 
+        request_started = time.perf_counter()
+        original_query = question.strip()
+        timings: dict[str, float] = {}
+        rewrite_started = time.perf_counter()
+        rewritten_query = (
+            self._query_rewriter.rewrite(original_query)
+            if self._query_rewriter
+            else original_query
+        )
+        timings["query_rewriter_time_ms"] = self._elapsed_ms(rewrite_started)
+        question = rewritten_query
+        logger.info(
+            "Query rewrite: original=%r rewritten=%r",
+            original_query[:160],
+            rewritten_query[:160],
+        )
+
         k = top_k or self._settings.final_context_k
         corpus_key = self._corpus_key()
-        use_cache = self._should_use_answer_cache(question, session_id)
+        use_cache = self._should_use_answer_cache(original_query, session_id)
 
         # Guard: no documents
         if self._vector_store.count == 0:
@@ -348,18 +369,33 @@ class RAGPipeline:
                 sources=[],
                 confidence=0.0,
             )
-            self._memory.add_turn(session_id, question, response.answer)
+            response = self._finalize_response(
+                response, original_query, rewritten_query, timings, request_started
+            )
+            self._memory.add_turn(session_id, original_query, response.answer)
             return response
 
         if use_cache:
+            cache_started = time.perf_counter()
             cached = self._answer_cache.get_exact(question, corpus_key, k)
+            timings["cache_lookup_time_ms"] = self._elapsed_ms(cache_started)
             if cached:
-                self._memory.add_turn(session_id, question, cached.answer)
+                cached = self._finalize_response(
+                    cached, original_query, rewritten_query, timings,
+                    request_started, cache_hit=True,
+                )
+                self._memory.add_turn(session_id, original_query, cached.answer)
                 return cached
+        else:
+            timings["cache_lookup_time_ms"] = 0.0
 
         exact_metric_response = self._direct_exact_metric_query(question)
         if exact_metric_response:
-            self._memory.add_turn(session_id, question, exact_metric_response.answer)
+            exact_metric_response = self._finalize_response(
+                exact_metric_response, original_query, rewritten_query, timings,
+                request_started, cache_miss=use_cache,
+            )
+            self._memory.add_turn(session_id, original_query, exact_metric_response.answer)
             return exact_metric_response
 
         graph_fact_response = self._direct_graph_fact_query(question)
@@ -367,7 +403,11 @@ class RAGPipeline:
             if use_cache:
                 q_emb = self._embedding_model.embed_query(question)
                 self._answer_cache.set(question, q_emb, corpus_key, k, graph_fact_response)
-            self._memory.add_turn(session_id, question, graph_fact_response.answer)
+            graph_fact_response = self._finalize_response(
+                graph_fact_response, original_query, rewritten_query, timings,
+                request_started, cache_miss=use_cache,
+            )
+            self._memory.add_turn(session_id, original_query, graph_fact_response.answer)
             return graph_fact_response
 
         # Route: keyword-presence
@@ -379,7 +419,11 @@ class RAGPipeline:
                 if use_cache:
                     q_emb = self._embedding_model.embed_query(question)
                     self._answer_cache.set(question, q_emb, corpus_key, k, response)
-                self._memory.add_turn(session_id, question, response.answer)
+                response = self._finalize_response(
+                    response, original_query, rewritten_query, timings,
+                    request_started, cache_miss=use_cache,
+                )
+                self._memory.add_turn(session_id, original_query, response.answer)
                 return response
 
         # Route: semantic RAG
@@ -389,8 +433,11 @@ class RAGPipeline:
             session_id=session_id,
             corpus_key=corpus_key,
             use_cache=use_cache,
+            original_query=original_query,
+            base_timings=timings,
+            request_started=request_started,
         )
-        self._memory.add_turn(session_id, question, response.answer)
+        self._memory.add_turn(session_id, original_query, response.answer)
         return response
 
     # ── Private: keyword-presence query ──────────────────────────────────────
@@ -449,6 +496,9 @@ class RAGPipeline:
         session_id: str | None = None,
         corpus_key: str | None = None,
         use_cache: bool = True,
+        original_query: str | None = None,
+        base_timings: dict[str, float] | None = None,
+        request_started: float | None = None,
     ) -> QueryResponse:
         """
         Agentic RAG pipeline:
@@ -463,13 +513,18 @@ class RAGPipeline:
         """
         settings = self._settings
         k = top_k or settings.final_context_k
+        timings = dict(base_timings or {})
+        request_started = request_started or time.perf_counter()
+        original_query = original_query or question
 
         logger.info("Semantic query: %r", question[:120])
 
         # ── Step 1: Query Planning Agent ──────────────────────────────────────
         classification: QueryClassification | None = None
         if self._query_agent:
+            classifier_started = time.perf_counter()
             classification = self._query_agent.classify(question)
+            timings["query_classifier_time_ms"] = self._elapsed_ms(classifier_started)
             # Override top_k from classification unless user specified one
             if top_k is None:
                 k = classification.top_k
@@ -480,21 +535,36 @@ class RAGPipeline:
                 classification.retrieval_strategy,
                 k,
             )
+        else:
+            timings["query_classifier_time_ms"] = 0.0
 
         # ── Step 2: Embed query ───────────────────────────────────────────────
         query_embedding = self._embedding_model.embed_query(question)
 
-        if use_cache:
+        if use_cache and settings.semantic_cache_enabled:
+            cache_started = time.perf_counter()
             cached = self._answer_cache.get_semantic(
                 query_embedding, corpus_key or self._corpus_key(), k
             )
+            timings["cache_lookup_time_ms"] = (
+                timings.get("cache_lookup_time_ms", 0.0)
+                + self._elapsed_ms(cache_started)
+            )
             if cached:
-                return cached
+                return self._finalize_response(
+                    cached, original_query, question, timings, request_started,
+                    cache_hit=True,
+                )
+        elif "cache_lookup_time_ms" not in timings:
+            timings["cache_lookup_time_ms"] = 0.0
 
         # ── Step 3: Graph retrieval (confidence-filtered, depth=1) ────────────
+        graph_started = time.perf_counter()
         graph_results, query_entity_ids = self._graph_retrieve(question)
+        timings["graph_retrieval_time_ms"] = self._elapsed_ms(graph_started)
 
         # ── Step 4: Retrieval (strategy-routed or fallback) ───────────────────
+        retrieval_started = time.perf_counter()
         if classification and classification.retrieval_strategy != "hybrid":
             retrieved = self._retriever.retrieve_with_strategy(
                 query=question,
@@ -517,6 +587,9 @@ class RAGPipeline:
                 graph_results=graph_results,
                 query_entity_ids=query_entity_ids,
             )
+        retrieval_timings = getattr(self._retriever, "last_timings", {})
+        timings.update(retrieval_timings)
+        timings["hybrid_retrieval_time_ms"] = self._elapsed_ms(retrieval_started)
 
         top_score = retrieved[0].relevance_score if retrieved else 0.0
         logger.info(
@@ -528,11 +601,15 @@ class RAGPipeline:
             and self._reasoning_agent
             and self._is_global_reasoning_query(classification)
         ):
+            adaptive_started = time.perf_counter()
             retrieved = self._adaptive_global_retrieve(
                 question, query_embedding, classification, retrieved,
                 graph_results, query_entity_ids,
             )
             top_score = retrieved[0].relevance_score if retrieved else 0.0
+            timings["evidence_validation_time_ms"] = self._elapsed_ms(adaptive_started)
+        else:
+            timings.setdefault("evidence_validation_time_ms", 0.0)
 
         # ── Step 5: Iterative retrieval (Feature 4) ───────────────────────────
         if (
@@ -540,11 +617,13 @@ class RAGPipeline:
             and classification.retrieval_strategy == "iterative"
             and self._reasoning_agent
         ):
+            iterative_started = time.perf_counter()
             retrieved = self._iterative_retrieve(
                 question, query_embedding, classification, retrieved,
                 graph_results, query_entity_ids,
             )
             top_score = retrieved[0].relevance_score if retrieved else 0.0
+            timings["evidence_validation_time_ms"] += self._elapsed_ms(iterative_started)
 
         # ── Step 6: LLM fallback for general questions ────────────────────────
         is_corpus_wide = (
@@ -561,9 +640,15 @@ class RAGPipeline:
                 top_score,
             )
             try:
-                return generate_llm_fallback(
+                generation_started = time.perf_counter()
+                fallback = generate_llm_fallback(
                     question,
                     conversation_history=self._memory.format_history(session_id),
+                )
+                timings["generation_time_ms"] = self._elapsed_ms(generation_started)
+                return self._finalize_response(
+                    fallback, original_query, question, timings, request_started,
+                    cache_miss=use_cache,
                 )
             except Exception as exc:
                 logger.warning(
@@ -573,9 +658,11 @@ class RAGPipeline:
         # ── Step 7: Reasoning Agent (Feature 3) ──────────────────────────────
         reasoning_output: ReasoningOutput | None = None
         if self._reasoning_agent and classification:
+            reasoning_started = time.perf_counter()
             reasoning_output = self._reasoning_agent.run(
                 question, classification, retrieved
             )
+            timings["reasoning_agent_time_ms"] = self._elapsed_ms(reasoning_started)
             logger.info(
                 "Reasoning: sufficient=%s entities=%d calculations=%d rankings=%d",
                 reasoning_output.evidence_sufficient,
@@ -588,10 +675,13 @@ class RAGPipeline:
                 reasoning_output.calculations[:3],
                 reasoning_output.rankings[:3],
             )
+        else:
+            timings["reasoning_agent_time_ms"] = 0.0
 
         # ── Step 8: Generate grounded answer ──────────────────────────────────
         conversation_history = self._memory.format_history(session_id)
 
+        generation_started = time.perf_counter()
         response = generate_answer(
             question,
             retrieved,
@@ -599,6 +689,7 @@ class RAGPipeline:
             conversation_history=conversation_history,
             reasoning_output=reasoning_output,
         )
+        timings["generation_time_ms"] = self._elapsed_ms(generation_started)
 
         # Attach classification info to response
         if classification:
@@ -614,7 +705,10 @@ class RAGPipeline:
                 k,
                 response,
             )
-        return response
+        return self._finalize_response(
+            response, original_query, question, timings, request_started,
+            cache_miss=use_cache,
+        )
 
     def _is_global_reasoning_query(
         self, classification: QueryClassification
@@ -625,6 +719,54 @@ class RAGPipeline:
                 classification.query_scope == "GLOBAL"
                 and classification.query_type in {"AGGREGATION", "COUNTING"}
             )
+        )
+
+    def _elapsed_ms(self, started: float) -> float:
+        return round((time.perf_counter() - started) * 1000, 3)
+
+    def _finalize_response(
+        self,
+        response: QueryResponse,
+        original_query: str,
+        rewritten_query: str,
+        timings: dict[str, float],
+        request_started: float,
+        cache_hit: bool = False,
+        cache_miss: bool = False,
+    ) -> QueryResponse:
+        metric_defaults = {
+            "query_rewriter_time_ms": 0.0,
+            "query_classifier_time_ms": 0.0,
+            "dense_retrieval_time_ms": 0.0,
+            "bm25_retrieval_time_ms": 0.0,
+            "graph_retrieval_time_ms": 0.0,
+            "hybrid_retrieval_time_ms": 0.0,
+            "rrf_fusion_time_ms": 0.0,
+            "evidence_validation_time_ms": 0.0,
+            "graph_boosting_time_ms": 0.0,
+            "cross_encoder_rerank_time_ms": 0.0,
+            "reranking_time_ms": 0.0,
+            "reasoning_agent_time_ms": 0.0,
+            "generation_time_ms": 0.0,
+            "cache_lookup_time_ms": 0.0,
+        }
+        merged = {**metric_defaults, **timings}
+        merged["total_response_time_ms"] = self._elapsed_ms(request_started)
+        logger.info(
+            "Query completed cache_hit=%s total_ms=%.1f original=%r rewritten=%r",
+            cache_hit,
+            merged["total_response_time_ms"],
+            original_query[:120],
+            rewritten_query[:120],
+        )
+        return response.model_copy(
+            update={
+                "original_query": original_query,
+                "rewritten_query": rewritten_query,
+                "cache_hit": cache_hit,
+                "cache_miss": bool(cache_miss and not cache_hit),
+                "latency_metrics": merged,
+            }
         )
 
     def _adaptive_global_retrieve(

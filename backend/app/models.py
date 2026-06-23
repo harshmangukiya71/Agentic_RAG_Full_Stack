@@ -123,6 +123,11 @@ class QueryResponse(BaseModel):
     sources: list[SourceReference]
     confidence: float = Field(..., ge=0.0, le=1.0)
     query_classification: Optional[QueryClassification] = None
+    original_query: Optional[str] = None
+    rewritten_query: Optional[str] = None
+    cache_hit: bool = False
+    cache_miss: bool = False
+    latency_metrics: dict[str, float] = Field(default_factory=dict)
 
 
 class IngestResponse(BaseModel):
@@ -169,6 +174,17 @@ class EvalResult(BaseModel):
     hit_at_5: bool
     rank: int
     reciprocal_rank: float
+    original_query: Optional[str] = None
+    rewritten_query: Optional[str] = None
+    precision_at_1: float = 0.0
+    precision_at_3: float = 0.0
+    precision_at_5: float = 0.0
+    faithfulness: float = 0.0
+    answer_relevancy: float = 0.0
+    bertscore_precision: float = 0.0
+    bertscore_recall: float = 0.0
+    bertscore_f1: float = 0.0
+    total_response_time_ms: float = 0.0
 
 
 class EvalReport(BaseModel):
@@ -179,9 +195,17 @@ class EvalReport(BaseModel):
     recall_at_1: float
     recall_at_3: float
     recall_at_5: float
+    hit_rate_at_1: float = 0.0
+    hit_rate_at_3: float = 0.0
+    hit_rate_at_5: float = 0.0
     mrr: float
+    precision_at_1: float = 0.0
     precision_at_3: float
+    precision_at_5: float = 0.0
     hits: int
+    retrieval_metrics: dict[str, Any] = Field(default_factory=dict)
+    generation_metrics: dict[str, float] = Field(default_factory=dict)
+    latency_metrics: dict[str, float] = Field(default_factory=dict)
     results: list[EvalResult]
 
 

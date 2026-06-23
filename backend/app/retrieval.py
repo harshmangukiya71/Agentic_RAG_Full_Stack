@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import Sequence
 
 import numpy as np
@@ -152,6 +153,10 @@ class HybridRetriever:
         self._bm25: BM25Okapi | None = None
         self._tokenized_corpus: list[list[str]] = []
         self._corpus_vocab: set[str] = set()
+        self.last_timings: dict[str, float] = {}
+
+    def _elapsed_ms(self, started: float) -> float:
+        return round((time.perf_counter() - started) * 1000, 3)
 
     def rebuild_bm25(self, all_chunks: list[Chunk]) -> None:
         self._corpus_chunks = all_chunks
@@ -241,17 +246,26 @@ class HybridRetriever:
           graph boost → top-20 → cross-encoder rerank → top_k_final
         """
         settings = get_settings()
+        timings: dict[str, float] = {}
 
+        started = time.perf_counter()
         bm25_results = self.bm25_retrieve(query, top_k=settings.bm25_top_k)
+        timings["bm25_retrieval_time_ms"] = self._elapsed_ms(started)
+
+        started = time.perf_counter()
         dense_results = vector_store.query(
             query_embedding=query_embedding.tolist(),
             top_k=settings.dense_top_k,
         )
+        timings["dense_retrieval_time_ms"] = self._elapsed_ms(started)
         graph_results = graph_results or []
 
+        started = time.perf_counter()
         fused = _reciprocal_rank_fusion(bm25_results, dense_results, graph_results)
         fused = _filter_low_evidence_chunks(fused, query_entity_ids or set())
+        timings["rrf_fusion_time_ms"] = self._elapsed_ms(started)
 
+        started = time.perf_counter()
         if graph_results:
             graph_keys = {(c.document, c.chunk_index) for c in graph_results}
             max_boost = settings.graph_boost_weight
@@ -279,8 +293,13 @@ class HybridRetriever:
                 key=lambda c: c.relevance_score,
                 reverse=True,
             )
+        timings["graph_boosting_time_ms"] = self._elapsed_ms(started)
 
+        started = time.perf_counter()
         reranked = self.rerank(query, fused[:20], top_k=settings.rerank_top_k)
+        timings["cross_encoder_rerank_time_ms"] = self._elapsed_ms(started)
+        timings["reranking_time_ms"] = timings["cross_encoder_rerank_time_ms"]
+        self.last_timings = timings
         logger.debug(
             "Hybrid: bm25=%d dense=%d graph=%d fused=%d reranked=%d",
             len(bm25_results), len(dense_results),
@@ -323,6 +342,7 @@ class HybridRetriever:
         """
         settings = get_settings()
         sources = self._STRATEGY_SOURCES.get(strategy, self._STRATEGY_SOURCES["hybrid"])
+        timings: dict[str, float] = {}
 
         logger.info(
             "Strategy retrieval: strategy=%s top_k=%d sources=%s",
@@ -338,24 +358,35 @@ class HybridRetriever:
             # Scale BM25 top_k proportionally to the requested top_k
             bm25_multiplier = 4 if strategy == "exact_graph_metadata" else 2
             bm25_k = max(settings.bm25_top_k, top_k * bm25_multiplier)
+            started = time.perf_counter()
             bm25_results = self.bm25_retrieve(query, top_k=bm25_k)
+            timings["bm25_retrieval_time_ms"] = self._elapsed_ms(started)
+        else:
+            timings["bm25_retrieval_time_ms"] = 0.0
 
         if sources["dense"]:
             dense_multiplier = 4 if strategy == "dense_heavy" else 2
             dense_k = max(settings.dense_top_k, top_k * dense_multiplier)
+            started = time.perf_counter()
             dense_results = vector_store.query(
                 query_embedding=query_embedding.tolist(),
                 top_k=dense_k,
             )
+            timings["dense_retrieval_time_ms"] = self._elapsed_ms(started)
+        else:
+            timings["dense_retrieval_time_ms"] = 0.0
 
         if not sources["graph"]:
             g_results = []
 
         # ── Fuse ─────────────────────────────────────────────────────────────
+        started = time.perf_counter()
         fused = _reciprocal_rank_fusion(bm25_results, dense_results, g_results)
         fused = _filter_low_evidence_chunks(fused, query_entity_ids or set())
+        timings["rrf_fusion_time_ms"] = self._elapsed_ms(started)
 
         # ── Graph boost ──────────────────────────────────────────────────────
+        started = time.perf_counter()
         if g_results:
             graph_keys = {(c.document, c.chunk_index) for c in g_results}
             max_boost = settings.graph_boost_weight
@@ -383,6 +414,7 @@ class HybridRetriever:
                 key=lambda c: c.relevance_score,
                 reverse=True,
             )
+        timings["graph_boosting_time_ms"] = self._elapsed_ms(started)
 
         # Keep local lookups fast; widen only for bounded corpus-wide reasoning.
         if (
@@ -395,7 +427,11 @@ class HybridRetriever:
         else:
             rerank_window = 20
         rerank_k = min(rerank_window, len(fused))
+        started = time.perf_counter()
         reranked = self.rerank(query, fused[:rerank_window], top_k=rerank_k)
+        timings["cross_encoder_rerank_time_ms"] = self._elapsed_ms(started)
+        timings["reranking_time_ms"] = timings["cross_encoder_rerank_time_ms"]
+        self.last_timings = timings
 
         logger.debug(
             "Strategy hybrid: bm25=%d dense=%d graph=%d fused=%d reranked=%d → top_k=%d",

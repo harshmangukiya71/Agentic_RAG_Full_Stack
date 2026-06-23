@@ -5,12 +5,27 @@ export interface SourceReference {
   document: string;
   page: number;
   chunk: string;
+  chunk_index?: number | null;
+  entities?: string[];
 }
 
 export interface QueryResponse {
+  status?: string;
   answer: string;
   sources: SourceReference[];
   confidence: number;
+  query_classification?: {
+    query_type: string;
+    query_scope: string;
+    retrieval_strategy: string;
+    top_k: number;
+    reasoning_hints: string[];
+  } | null;
+  original_query?: string | null;
+  rewritten_query?: string | null;
+  cache_hit?: boolean;
+  cache_miss?: boolean;
+  latency_metrics?: Record<string, number>;
 }
 
 export interface DocumentInfo {
@@ -24,12 +39,29 @@ export interface EvalResult {
   question: string;
   expected_document: string;
   expected_page: number;
-  retrieved_top5: { document: string; page: number; chunk_preview: string }[];
+  retrieved_top5: {
+    document: string;
+    page: number;
+    chunk_preview: string;
+    chunk_full?: string;
+    retrieval_source?: string;
+  }[];
   hit_at_1: boolean;
   hit_at_3: boolean;
   hit_at_5: boolean;
   rank: number;           // 1-based rank of correct result, 0 = not found
   reciprocal_rank: number;
+  original_query?: string | null;
+  rewritten_query?: string | null;
+  precision_at_1?: number;
+  precision_at_3?: number;
+  precision_at_5?: number;
+  faithfulness?: number;
+  answer_relevancy?: number;
+  bertscore_precision?: number;
+  bertscore_recall?: number;
+  bertscore_f1?: number;
+  total_response_time_ms?: number;
 }
 
 export interface EvalReport {
@@ -40,9 +72,22 @@ export interface EvalReport {
   recall_at_1: number;
   recall_at_3: number;
   recall_at_5: number;
+  hit_rate_at_1?: number;
+  hit_rate_at_3?: number;
+  hit_rate_at_5?: number;
   mrr: number;
-  precision_at_3: number; // legacy alias = recall_at_3
+  precision_at_1?: number;
+  precision_at_3: number;
+  precision_at_5?: number;
   hits: number;           // legacy alias = hits_at_3
+  retrieval_metrics?: {
+    recall_at_k?: Record<string, number>;
+    precision_at_k?: Record<string, number>;
+    hit_rate?: Record<string, number>;
+    mrr?: number;
+  };
+  generation_metrics?: Record<string, number>;
+  latency_metrics?: Record<string, number>;
   results: EvalResult[];
 }
 

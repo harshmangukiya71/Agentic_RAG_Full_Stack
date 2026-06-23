@@ -54,6 +54,9 @@ class Settings(BaseSettings):
 
     chunk_size_tokens: int = 512
     chunk_overlap_tokens: int = 64
+    semantic_chunking_enabled: bool = True
+    semantic_chunk_similarity_drop: float = 0.18
+    semantic_chunk_min_tokens: int = 80
     min_native_chars_per_page: int = 40
     ocr_render_dpi: int = 220
 
@@ -74,6 +77,7 @@ class Settings(BaseSettings):
     memory_max_turns: int = 4
 
     cache_enabled: bool = True
+    semantic_cache_enabled: bool = True
     cache_ttl_seconds: int = 60 * 60
     cache_max_entries: int = 512
     semantic_cache_threshold: float = 0.92
@@ -87,8 +91,11 @@ class Settings(BaseSettings):
     cors_origins: list[str] = []
 
     # ── Agentic RAG settings ──────────────────────────────────────────────────
+    query_rewriter_enabled: bool = True
+    query_rewriter_llm_enabled: bool = False
     query_agent_enabled: bool = True
     reasoning_agent_enabled: bool = True
+    generation_evaluation_enabled: bool = True
     max_retrieval_iterations: int = 3
     cache_load_monitoring: bool = True
     cache_ready_percent: int = 100

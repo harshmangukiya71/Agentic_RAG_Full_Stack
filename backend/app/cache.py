@@ -62,10 +62,6 @@ logger = logging.getLogger(__name__)
 # Redis key prefix — change if you run multiple RAG instances on one Redis
 _KEY_PREFIX = "rag"
 
-# Semantic threshold hard cap — never go above 0.85 even if config says so
-_MAX_SEMANTIC_THRESHOLD = 0.85
-
-
 # ── Serialisation helpers ─────────────────────────────────────────────────────
 
 def _response_to_dict(response: QueryResponse) -> dict:
@@ -283,7 +279,7 @@ class AnswerCache:
         self._enabled = settings.cache_enabled
         self._ttl = settings.cache_ttl_seconds
         self._max_entries = max(1, settings.cache_max_entries)
-        self._threshold = min(settings.semantic_cache_threshold, _MAX_SEMANTIC_THRESHOLD)
+        self._threshold = settings.semantic_cache_threshold
 
         # L1: Redis
         self._redis = _RedisClient(settings.redis_url, self._ttl)

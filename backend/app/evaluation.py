@@ -36,9 +36,11 @@ from itertools import cycle
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 from openai import OpenAI
 
 from app.config import get_settings
+from app.embeddings import EmbeddingModel
 from app.models import Chunk, EvalPair, EvalReport, EvalResult
 
 if TYPE_CHECKING:
@@ -100,6 +102,34 @@ def _token_overlap(a: str, b: str) -> float:
     return len(ta & tb) / min(len(ta), len(tb))
 
 
+def _cosine_similarity(a: str, b: str) -> float:
+    if not a.strip() or not b.strip():
+        return 0.0
+    try:
+        model = EmbeddingModel.get()
+        vec_a = model.embed_query(a)
+        vec_b = model.embed_query(b)
+        denom = float(np.linalg.norm(vec_a) * np.linalg.norm(vec_b))
+        if denom <= 0:
+            return 0.0
+        return round(max(0.0, min(1.0, float(np.dot(vec_a, vec_b) / denom))), 4)
+    except Exception as exc:
+        logger.debug("Embedding similarity unavailable; using token overlap: %s", exc)
+        return round(_token_overlap(a, b), 4)
+
+
+def _bertscore_like(answer: str, reference: str) -> dict[str, float]:
+    if not reference.strip():
+        return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
+    semantic = _cosine_similarity(answer, reference)
+    token_precision = _token_overlap(answer, reference)
+    token_recall = _token_overlap(reference, answer)
+    precision = round(max(semantic, token_precision), 4)
+    recall = round(max(semantic, token_recall), 4)
+    f1 = round((2 * precision * recall / (precision + recall)), 4) if precision + recall else 0.0
+    return {"precision": precision, "recall": recall, "f1": f1}
+
+
 # ── Faithfulness / grounding helpers ─────────────────────────────────────────
 
 def _answer_faithfulness(answer: str, context_chunks: list[str]) -> float:
@@ -153,7 +183,7 @@ def _compute_grounding_metrics(
 
 # ── Dedup ─────────────────────────────────────────────────────────────────────
 
-_PoolItem = tuple[str, str, int, str]  # (question, document, page, type)
+_PoolItem = tuple[str, str, int, str, str]  # question, document, page, type, reference_answer
 
 
 def _deduplicate(
@@ -272,13 +302,13 @@ def _generate_and_verify(
     """
     Verify each candidate question against the source chunk.
     Only questions whose answers can be extracted from the chunk are kept.
-    Returns list of verified (question, document, page, type) tuples.
+    Returns verified question tuples including the extracted reference answer.
     """
     verified: list[_PoolItem] = []
     for q in questions_raw:
         answer = _verify_question(q, chunk.text)
         if answer is not None:
-            verified.append((q, chunk.document, chunk.page, q_type))
+            verified.append((q, chunk.document, chunk.page, q_type, answer))
             logger.debug("  ✓ VERIFIED [%s]: %s", q_type, q[:60])
         else:
             logger.info(
@@ -517,7 +547,9 @@ def _build_pool(all_chunks: list[Chunk], n_pairs: int) -> list[_PoolItem]:
                     # Verify before adding
                     answer = _verify_question(q, chunk.text)
                     if answer is not None:
-                        candidate: _PoolItem = (q, chunk.document, chunk.page, "factual")
+                        candidate: _PoolItem = (
+                            q, chunk.document, chunk.page, "factual", answer
+                        )
                         if all(
                             _token_overlap(q, ex[0]) < _DEDUP_OVERLAP_THRESHOLD
                             for ex in deduped
@@ -551,19 +583,53 @@ def _compute_report(
     hits_at_3: int,
     hits_at_5: int,
     reciprocal_rank_sum: float,
+    latency_samples: list[dict[str, float]],
 ) -> EvalReport:
     n = max(len(pairs), 1)
+    hit_rate_at_1 = round(hits_at_1 / n, 4)
+    hit_rate_at_3 = round(hits_at_3 / n, 4)
+    hit_rate_at_5 = round(hits_at_5 / n, 4)
+    precision_at_1 = round(hits_at_1 / n, 4)
+    precision_at_3 = round(hits_at_3 / (n * 3), 4)
+    precision_at_5 = round(hits_at_5 / (n * 5), 4)
+    mrr = round(reciprocal_rank_sum / n, 4)
+    retrieval_metrics = {
+        "recall_at_k": {"1": hit_rate_at_1, "3": hit_rate_at_3, "5": hit_rate_at_5},
+        "precision_at_k": {"1": precision_at_1, "3": precision_at_3, "5": precision_at_5},
+        "hit_rate": {"1": hit_rate_at_1, "3": hit_rate_at_3, "5": hit_rate_at_5},
+        "mrr": mrr,
+    }
+    generation_metrics = {
+        "faithfulness": round(sum(r.faithfulness for r in results) / n, 4),
+        "answer_relevancy": round(sum(r.answer_relevancy for r in results) / n, 4),
+        "bertscore_precision": round(sum(r.bertscore_precision for r in results) / n, 4),
+        "bertscore_recall": round(sum(r.bertscore_recall for r in results) / n, 4),
+        "bertscore_f1": round(sum(r.bertscore_f1 for r in results) / n, 4),
+    }
+    latency_keys = sorted({key for sample in latency_samples for key in sample})
+    latency_metrics = {
+        key: round(sum(sample.get(key, 0.0) for sample in latency_samples) / n, 3)
+        for key in latency_keys
+    }
     return EvalReport(
         total_questions=len(pairs),
         hits_at_1=hits_at_1,
         hits_at_3=hits_at_3,
         hits_at_5=hits_at_5,
-        recall_at_1=round(hits_at_1 / n, 4),
-        recall_at_3=round(hits_at_3 / n, 4),
-        recall_at_5=round(hits_at_5 / n, 4),
-        mrr=round(reciprocal_rank_sum / n, 4),
-        precision_at_3=round(hits_at_3 / n, 4),
+        recall_at_1=hit_rate_at_1,
+        recall_at_3=hit_rate_at_3,
+        recall_at_5=hit_rate_at_5,
+        hit_rate_at_1=hit_rate_at_1,
+        hit_rate_at_3=hit_rate_at_3,
+        hit_rate_at_5=hit_rate_at_5,
+        mrr=mrr,
+        precision_at_1=precision_at_1,
+        precision_at_3=precision_at_3,
+        precision_at_5=precision_at_5,
         hits=hits_at_3,
+        retrieval_metrics=retrieval_metrics,
+        generation_metrics=generation_metrics,
+        latency_metrics=latency_metrics,
         results=results,
     )
 
@@ -578,6 +644,7 @@ def _run_retrieval_eval(
     reciprocal_rank_sum = 0.0
     faithfulness_scores: list[float] = []
     coverage_scores: list[float] = []
+    latency_samples: list[dict[str, float]] = []
     speculative_count = 0
     unsupported_count = 0
     type_hits: dict[str, dict[str, int]] = defaultdict(
@@ -605,6 +672,7 @@ def _run_retrieval_eval(
                     rank=0, reciprocal_rank=0.0,
                 )
             )
+            latency_samples.append({})
             continue
 
         retrieved_top5 = [
@@ -629,6 +697,11 @@ def _run_retrieval_eval(
         reciprocal_rank_sum += rr
 
         grounding = _compute_grounding_metrics(response.answer, retrieved_top5)
+        reference_answer = pair.answer_hint or ""
+        answer_relevancy = _cosine_similarity(pair.question, response.answer)
+        bertscore = _bertscore_like(response.answer, reference_answer)
+        latency = dict(response.latency_metrics or {})
+        latency_samples.append(latency)
         faithfulness_scores.append(grounding["faithfulness"])
         coverage_scores.append(grounding["evidence_coverage"])
         if grounding["is_speculative"]: speculative_count += 1
@@ -643,6 +716,17 @@ def _run_retrieval_eval(
                 hit_at_1=h1, hit_at_3=h3, hit_at_5=h5,
                 rank=rank,
                 reciprocal_rank=round(rr, 4),
+                original_query=response.original_query,
+                rewritten_query=response.rewritten_query,
+                precision_at_1=1.0 if h1 else 0.0,
+                precision_at_3=round((1.0 / 3.0) if h3 else 0.0, 4),
+                precision_at_5=round((1.0 / 5.0) if h5 else 0.0, 4),
+                faithfulness=grounding["faithfulness"],
+                answer_relevancy=answer_relevancy,
+                bertscore_precision=bertscore["precision"],
+                bertscore_recall=bertscore["recall"],
+                bertscore_f1=bertscore["f1"],
+                total_response_time_ms=latency.get("total_response_time_ms", 0.0),
             )
         )
 
@@ -657,7 +741,8 @@ def _run_retrieval_eval(
         )
 
     report = _compute_report(
-        pairs, results, hits_at_1, hits_at_3, hits_at_5, reciprocal_rank_sum
+        pairs, results, hits_at_1, hits_at_3, hits_at_5,
+        reciprocal_rank_sum, latency_samples,
     )
     n = max(len(pairs), 1)
     report.__dict__["grounding_summary"] = {
@@ -712,18 +797,18 @@ def auto_evaluate(pipeline: "RAGPipeline", n_pairs: int = 10) -> EvalReport:
 
     logger.info("Final verified pool: %d questions (target %d).", len(pool), n_pairs)
     type_counts: dict[str, int] = defaultdict(int)
-    for _, _, _, q_type in pool:
+    for _, _, _, q_type, _reference_answer in pool:
         type_counts[q_type] += 1
     for q_type, count in type_counts.items():
         logger.info("  %s: %d", q_type, count)
 
     pairs: list[EvalPair] = []
-    for question, document, page, q_type in pool:
+    for question, document, page, q_type, reference_answer in pool:
         pair = EvalPair(
             question=question,
             expected_document=document,
             expected_page=page,
-            answer_hint=q_type,
+            answer_hint=reference_answer,
         )
         pair.__dict__["question_type"] = q_type
         pairs.append(pair)
