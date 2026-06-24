@@ -168,6 +168,8 @@ class EvalResult(BaseModel):
     question: str
     expected_document: str
     expected_page: int
+    generated_answer: str = ""
+    reference_answer: str = ""
     retrieved_top5: list[dict]
     hit_at_1: bool
     hit_at_3: bool
@@ -184,6 +186,7 @@ class EvalResult(BaseModel):
     bertscore_precision: float = 0.0
     bertscore_recall: float = 0.0
     bertscore_f1: float = 0.0
+    latency_metrics: dict[str, float] = Field(default_factory=dict)
     total_response_time_ms: float = 0.0
 
 

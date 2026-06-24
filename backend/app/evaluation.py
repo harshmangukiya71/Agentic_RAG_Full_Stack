@@ -667,6 +667,7 @@ def _run_retrieval_eval(
                     question=pair.question,
                     expected_document=pair.expected_document,
                     expected_page=pair.expected_page,
+                    reference_answer=pair.answer_hint or "",
                     retrieved_top5=[],
                     hit_at_1=False, hit_at_3=False, hit_at_5=False,
                     rank=0, reciprocal_rank=0.0,
@@ -712,6 +713,8 @@ def _run_retrieval_eval(
                 question=pair.question,
                 expected_document=pair.expected_document,
                 expected_page=pair.expected_page,
+                generated_answer=response.answer,
+                reference_answer=reference_answer,
                 retrieved_top5=retrieved_top5,
                 hit_at_1=h1, hit_at_3=h3, hit_at_5=h5,
                 rank=rank,
@@ -726,6 +729,7 @@ def _run_retrieval_eval(
                 bertscore_precision=bertscore["precision"],
                 bertscore_recall=bertscore["recall"],
                 bertscore_f1=bertscore["f1"],
+                latency_metrics=latency,
                 total_response_time_ms=latency.get("total_response_time_ms", 0.0),
             )
         )

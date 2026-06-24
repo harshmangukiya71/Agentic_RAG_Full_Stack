@@ -39,6 +39,8 @@ export interface EvalResult {
   question: string;
   expected_document: string;
   expected_page: number;
+  generated_answer?: string;
+  reference_answer?: string;
   retrieved_top5: {
     document: string;
     page: number;
@@ -61,6 +63,7 @@ export interface EvalResult {
   bertscore_precision?: number;
   bertscore_recall?: number;
   bertscore_f1?: number;
+  latency_metrics?: Record<string, number>;
   total_response_time_ms?: number;
 }
 
