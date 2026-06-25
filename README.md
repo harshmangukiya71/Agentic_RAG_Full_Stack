@@ -3,7 +3,7 @@
 ## Live Demo
 
 Frontend:
-[https://agentic-rag-full-stack-31x3rxy8y.vercel.app/](https://agentic-rag-full-stack.vercel.app/)
+https://agentic-rag-full-stack.vercel.app/
 
 Backend API:
 https://agenticragfullstack-production.up.railway.app/docs
@@ -24,81 +24,94 @@ https://agenticragfullstack-production.up.railway.app/docs
                                                      │
                                                      ▼
                                         ┌─────────────────────────┐
-                                        │ Query Classification    │
+                                        │ Query Rewriter /        │
+                                        │ Query Optimizer (LLM)   │
                                         │                         │
-                                        │ • Entity Lookup         │
-                                        │ • Semantic Search       │
-                                        │ • Counting / Ranking    │
-                                        │ • Comparison            │
-                                        │ • Temporal Queries      │
-                                        │ • Multi-Hop Reasoning   │
+                                        │ • Rewrite Query         │
+                                        │ • Expand Intent         │
+                                        │ • Normalize Query       │
                                         └────────────┬────────────┘
                                                      │
                                                      ▼
-                    ┌─────────────────────────────────────────────────────────┐
-                    │                Hybrid Retrieval Engine                  │
-                    │                                                         │
-                    │ • ChromaDB Dense Vector Search                          │
-                    │ • BM25 Keyword Search                                   │
-                    │ • Neo4j Graph Retrieval                                 │
-                    └───────────────┬─────────────────────────────────────────┘
-                                    │
-                                    ▼
-                    ┌──────────────────────────────────────────┐
-                    │     Reciprocal Rank Fusion (RRF)         │
-                    │       Aggregates Retrieval Results       │
-                    └────────────────┬─────────────────────────┘
-                                     │
-                                     ▼
-                    ┌──────────────────────────────────────────┐
-                    │ Graph Boosting & Evidence Filtering      │
-                    └────────────────┬─────────────────────────┘
-                                     │
-                                     ▼
-                    ┌──────────────────────────────────────────┐
-                    │ Cross Encoder Re-Ranker                  │
-                    │ ms-marco-MiniLM-L-6-v2                   │
-                    └────────────────┬─────────────────────────┘
-                                     │
-                                     ▼
-                    ┌──────────────────────────────────────────┐
-                    │ Top Relevant Chunks + Graph Context      │
-                    └────────────────┬─────────────────────────┘
-                                     │
-                                     ▼
-                    ┌──────────────────────────────────────────┐
-                    │            Reasoning Agent               │
-                    │                                          │
-                    │ • Aggregation                            │
-                    │ • Counting                               │
-                    │ • Ranking                                │
-                    │ • Comparisons                            │
-                    │ • Evidence Validation                    │
-                    │ • Sufficiency Checks                     │
-                    └────────────────┬─────────────────────────┘
-                                     │
-                                     ▼
-                    ┌──────────────────────────────────────────┐
-                    │ NVIDIA Llama 3.3 70B                    │
-                    │ Grounded Answer Generation               │
-                    └────────────────┬─────────────────────────┘
-                                     │
-                                     ▼
-                    ┌──────────────────────────────────────────┐
-                    │ Confidence & Faithfulness Evaluation     │
-                    └────────────────┬─────────────────────────┘
-                                     │
-                                     ▼
-                    ┌──────────────────────────────────────────┐
-                    │ Final Response                           │
-                    │                                          │
-                    │ • Generated Answer                       │
-                    │ • Source Citations                       │
-                    │ • Confidence Score                       │
-                    │ • Query Classification                   │
-                    └──────────────────────────────────────────┘
-
-
+                                        ┌─────────────────────────┐
+                                        │ Semantic Cache (Redis)  │
+                                        │                         │
+                                        │ • Embedding Similarity  │
+                                        │ • Cache Lookup          │
+                                        └───────┬─────────┬───────┘
+                                                │         │
+                                        Cache Hit│         │Cache Miss
+                                                │         ▼
+                                                │
+                                                │  ┌─────────────────────────┐
+                                                │  │ Query Classification    │
+                                                │  │                         │
+                                                │  │ • Entity Lookup         │
+                                                │  │ • Semantic Search       │
+                                                │  │ • Counting / Ranking    │
+                                                │  │ • Comparison            │
+                                                │  │ • Temporal Queries      │
+                                                │  │ • Multi-Hop Reasoning   │
+                                                │  └────────────┬────────────┘
+                                                │               │
+                                                │               ▼
+                                                │  ┌─────────────────────────────────────────┐
+                                                │  │         Hybrid Retrieval Engine         │
+                                                │  │                                         │
+                                                │  │ • Dense Vector Search                  │
+                                                │  │ • BM25 Keyword Search                  │
+                                                │  │ • Neo4j Graph Retrieval                │
+                                                │  └───────────────┬─────────────────────────┘
+                                                │                  │
+                                                │                  ▼
+                                                │  ┌─────────────────────────────────────────┐
+                                                │  │ Reciprocal Rank Fusion (RRF)           │
+                                                │  └───────────────┬─────────────────────────┘
+                                                │                  │
+                                                │                  ▼
+                                                │  ┌─────────────────────────────────────────┐
+                                                │  │ Graph Boosting & Evidence Filtering     │
+                                                │  └───────────────┬─────────────────────────┘
+                                                │                  │
+                                                │                  ▼
+                                                │  ┌─────────────────────────────────────────┐
+                                                │  │ Cross Encoder Re-Ranker                 │
+                                                │  │ ms-marco-MiniLM-L-6-v2                  │
+                                                │  └───────────────┬─────────────────────────┘
+                                                │                  │
+                                                │                  ▼
+                                                │  ┌─────────────────────────────────────────┐
+                                                │  │ Top Relevant Chunks + Graph Context     │
+                                                │  └───────────────┬─────────────────────────┘
+                                                │                  │
+                                                │                  ▼
+                                                │  ┌─────────────────────────────────────────┐
+                                                │  │ Reasoning Agent                         │
+                                                │  │                                         │
+                                                │  │ • Aggregation                           │
+                                                │  │ • Counting                              │
+                                                │  │ • Ranking                               │
+                                                │  │ • Comparisons                           │
+                                                │  │ • Evidence Validation                   │
+                                                │  │ • Sufficiency Checks                    │
+                                                │  └───────────────┬─────────────────────────┘
+                                                │                  │
+                                                └──────────────────┤
+                                                                   ▼
+                                                ┌─────────────────────────────────────────┐
+                                                │ NVIDIA Llama 3.3 70B                    │
+                                                │ Grounded Answer Generation              │
+                                                └───────────────┬─────────────────────────┘
+                                                                │
+                                                                ▼
+                                                ┌─────────────────────────────────────────┐
+                                                │ Final Response                          │
+                                                │                                         │
+                                                │ • Generated Answer                      │
+                                                │ • Source Citations                      │
+                                                │ • Confidence Score                      │
+                                                │ • Query Classification                  │
+                                                └─────────────────────────────────────────┘
 
 =================================================================================
                                DOCUMENT INGESTION PIPELINE
@@ -182,59 +195,47 @@ https://agenticragfullstack-production.up.railway.app/docs
 
 ## What This Project Uses
 
-| Area | Technology |
-| --- | --- |
-| Backend API | FastAPI, Pydantic |
-| Frontend | Next.js 14, React 18, TypeScript |
-| LLM provider | NVIDIA OpenAI-compatible API |
-| Default LLM | `meta/llama-3.3-70b-instruct` |
-| Embedding model | `BAAI/bge-large-en-v1.5` via `sentence-transformers` |
-| Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
-| Vector database | Qdrant Cloud (Cosine, 4096 dim) or ChromaDB |
-| Graph database | Neo4j |
-| Keyword search | BM25 using `rank-bm25` |
-| OCR | Native PDF extraction with PyMuPDF, PaddleOCR fallback, Tesseract fallback |
-| Cache | Redis L1 cache, in-memory/disk fallback L2 cache |
-| Memory | Redis-backed chat memory with in-memory fallback |
-| Evaluation | Auto-generated verified QA pairs, Recall@1/@3/@5, MRR, grounding metrics |
-| Deployment | Docker, Docker Compose |
+| **Area**                      | **Technology**                                                                                                                                                                                              |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Backend API**               | FastAPI, Pydantic                                                                                                                                                                                           |
+| **Frontend**                  | Next.js 14, Next.js                                                                                                                                                                                         |
+| **LLM Provider**              | NVIDIA OpenAI-compatible API                                                                                                                                                                                |
+| **Default LLM**               | `meta/llama-3.3-70b-instruct`                                                                                                                                                                               |
+| **Embedding Model**           | NVIDIA Embedding API (`nvidia/llama-3.2-nv-embedqa-1b-v2`)                                                                                                                                                  |
+| **Query Optimization**        | LLM-based Query Rewriting & Query Classification                                                                                                                                                            |
+| **Chunking**                  | Semantic Chunking                                                                                                                                                                                           |
+| **Reranker**                  | `cross-encoder/ms-marco-MiniLM-L-6-v2`                                                                                                                                                                      |
+| **Vector Database**           | Qdrant Cloud (Cosine Similarity)                                                                                                                                                                            |
+| **Graph Database**            | Neo4j AuraDB (Cloud)                                                                                                                                                                                        |
+| **Keyword Search**            | BM25 (`rank-bm25`)                                                                                                                                                                                          |
+| **Hybrid Retrieval**          | Dense Retrieval + BM25 + Knowledge Graph Retrieval + Reciprocal Rank Fusion (RRF)                                                                                                                           |
+| **Reasoning**                 | Agentic Reasoning (Aggregation, Ranking, Counting, Comparison, Multi-hop Reasoning, Evidence Validation)                                                                                                    |
+| **OCR & Document Processing** | Native PDF Extraction (PyMuPDF), PaddleOCR Fallback, Tesseract Fallback                                                                                                                                     |
+| **Caching**                   | Semantic Cache (Redis) + Redis Chat Memory + In-Memory/Disk Fallback                                                                                                                                        |
+| **Evaluation**                | Auto-generated verified QA pairs, Retrieval Evaluation (Recall@1/@3/@5, Precision@1/@3/@5, Hit Rate, MRR), Generation Evaluation (Faithfulness, Answer Relevancy, BERTScore), End-to-End Latency Evaluation |
+| **Deployment**                | Docker, Docker Compose, Railway (Backend), Vercel (Frontend), Qdrant Cloud, Neo4j AuraDB                                                                                                                    |
+
 
 ## Core Features
 
 - Upload PDFs and image documents through the API/frontend.
-- Extract text from native PDFs and OCR scanned pages/images.
-- Build semantic chunks with page, chunk, section, extraction method, and OCR confidence metadata.
-- Extract financial/business entities and relationships into Neo4j.
-- Store local embeddings in ChromaDB.
-- Retrieve using a hybrid approach: BM25 + dense vector search + Neo4j entity graph.
-- Classify queries into lookup, structured reasoning, relationship, temporal, multi-hop, aggregation, counting, ranking, comparison, and analytical query types.
-- Rerank retrieved evidence with a cross-encoder.
-- Run a reasoning agent before generation for calculations, rankings, counts, and evidence sufficiency.
-- Generate grounded answers with source citations and confidence scores.
-- Cache repeated and semantically similar answers.
-- Evaluate retrieval and grounding quality from uploaded documents.
+- Extract text from native PDFs and OCR scanned pages/images using PyMuPDF with PaddleOCR/Tesseract fallback.
+- Perform semantic chunking while preserving document structure and metadata (page, chunk, section, extraction method, OCR confidence).
+- Generate document summaries for improved document understanding.
+- Extract financial/business entities and relationships into Neo4j AuraDB Knowledge Graph.
+- Generate NVIDIA embeddings and store vectors in Qdrant Cloud.
+- Retrieve documents using hybrid retrieval (Dense Vector Search + BM25 + Knowledge Graph Retrieval).
+- Rewrite and optimize user queries using an LLM-based Query Rewriter before retrieval.
+- Classify queries into entity lookup, semantic search, structured reasoning, temporal, relationship, multi-hop, aggregation, counting, ranking, comparison, and analytical query types.
+- Fuse retrieval results using Reciprocal Rank Fusion (RRF), apply graph-based boosting, and rerank using a Cross-Encoder (ms-marco-MiniLM-L-6-v2).
+- Execute an Agentic Reasoning module for aggregation, counting, ranking, comparison, multi-hop reasoning, evidence validation, and evidence sufficiency checks before answer generation.
+- Generate grounded answers using NVIDIA Llama 3.3 70B with source citations and confidence scores.
+- Accelerate repeated and semantically similar queries using Redis-based Semantic Caching and Redis-backed conversation memory.
+- Evaluate retrieval quality using Recall@1/@3/@5, Precision@1/@3/@5, Hit Rate, and Mean Reciprocal Rank (MRR).
+- Evaluate answer generation quality using Faithfulness, Answer Relevancy, and BERTScore (Precision, Recall, F1).
+- Measure end-to-end pipeline latency, including Query Rewriting, Query Classification, Retrieval, RRF Fusion, Graph Boosting, Cross-Encoder Reranking, Evidence Validation, Reasoning, Semantic Cache Lookup, and LLM Generation.
+- Deploy the production system using Railway (Backend), Vercel (Frontend), Qdrant Cloud, Neo4j AuraDB, Redis, and Docker.
 
-## Architecture
-
-```text
-frontend/Next.js
-    |
-    | REST API
-    v
-backend/FastAPI
-    |
-    |-- ingestion.py + ocr.py        -> document parsing and chunking
-    |-- entities.py                  -> entity and relation abstraction
-    |-- embeddings.py                -> local embedding model
-    |-- vectorstore.py               -> ChromaDB persistence
-    |-- graph.py                     -> Neo4j entity graph
-    |-- retrieval.py                 -> BM25 + dense + graph + rerank
-    |-- query_agent.py               -> query classifier and strategy router
-    |-- reasoning_agent.py           -> structured reasoning over evidence
-    |-- generation.py                -> grounded LLM answer generation
-    |-- evaluation.py                -> RAG quality evaluation
-    |-- cache.py / memory.py         -> answer cache and chat memory
-```
 
 ## Query Classification
 
@@ -332,58 +333,45 @@ The compose file starts the FastAPI backend and Next.js frontend. Ensure require
 
 ## Evaluation
 
-The project includes an automatic evaluation pipeline. It samples indexed chunks, asks the configured LLM to generate factual, relational, and comparative questions, verifies each question against the source chunk, and then evaluates retrieval quality.
+The project includes an automated end-to-end evaluation pipeline. It samples indexed chunks, prompts the configured LLM to generate factual, relational, comparative, and reasoning-based questions, verifies each question against the source documents, and evaluates both retrieval performance and answer generation quality.
 
-Metrics include:
-
+### Retrieval Evaluation
 - Recall@1, Recall@3, Recall@5
-- MRR
-- answer faithfulness
-- evidence coverage
-- unsupported answer rate
-- speculative graph edge rate
+- Precision@1, Precision@3, Precision@5
+- Hit Rate@1, Hit Rate@3, Hit Rate@5
+- Mean Reciprocal Rank (MRR)
 
-## Repository Structure
+### Generation Evaluation
+- Faithfulness
+- Answer Relevancy
+- BERTScore (Precision, Recall, F1)
 
-```text
-RAG/
-|-- backend/
-|   |-- app/
-|   |   |-- main.py
-|   |   |-- pipeline.py
-|   |   |-- ingestion.py
-|   |   |-- ocr.py
-|   |   |-- entities.py
-|   |   |-- graph.py
-|   |   |-- embeddings.py
-|   |   |-- vectorstore.py
-|   |   |-- retrieval.py
-|   |   |-- query_agent.py
-|   |   |-- reasoning_agent.py
-|   |   |-- generation.py
-|   |   |-- evaluation.py
-|   |   |-- cache.py
-|   |   |-- memory.py
-|   |   `-- models.py
-|   |-- data/
-|   |-- requirements.txt
-|   |-- Dockerfile
-|   `-- .env.example
-|-- frontend/
-|   |-- src/
-|   |-- package.json
-|   |-- Dockerfile
-|   `-- next.config.mjs
-|-- docker-compose.yml
-`-- README.md
-```
+### Pipeline Latency Evaluation
+- Query Rewriter Latency
+- Query Classification Latency
+- Dense Retrieval Latency
+- BM25 Retrieval Latency
+- Graph Retrieval Latency
+- Hybrid Retrieval Latency
+- Reciprocal Rank Fusion (RRF) Latency
+- Graph Boosting Latency
+- Cross-Encoder Reranking Latency
+- Evidence Validation Latency
+- Reasoning Agent Latency
+- Semantic Cache Lookup Latency
+- LLM Generation Latency
+- End-to-End Response Latency
 
-DocRAG is a full-stack document question-answering system for PDFs, scanned documents, screenshots, and image files. It combines dense vector search, keyword search, and graph-based entity retrieval so answers can use both semantic similarity and structured entity relationships.
+The evaluation dashboard provides both **per-question metrics** and **overall aggregate metrics**, enabling comprehensive analysis of retrieval quality, answer generation quality, and system performance across the complete Agentic RAG pipeline.
 
 ## Notes
 
-- The LLM is used for grounded answer generation, document summaries, entity/relation extraction, and evaluation question generation.
-- The embedding model runs locally through Sentence Transformers.
-- ChromaDB persists vectors under `backend/data/chroma_db` by default.
-- Neo4j stores entities, document mentions, and `RELATED` relationships extracted from document chunks.
-- The final answer is produced only after retrieval, reranking, reasoning, and confidence scoring.
+- The LLM is used for query rewriting, grounded answer generation, document summarization, entity and relationship extraction, reasoning, and automatic evaluation question generation.
+- NVIDIA Embedding API is used to generate high-dimensional semantic embeddings for both documents and queries.
+- Qdrant Cloud persists document embeddings and performs dense vector similarity search.
+- Neo4j AuraDB stores entities, document mentions, and semantic relationships extracted from document chunks for knowledge graph retrieval.
+- The retrieval pipeline combines Dense Vector Search, BM25 Keyword Search, and Knowledge Graph Retrieval using Reciprocal Rank Fusion (RRF), followed by graph boosting and Cross-Encoder reranking.
+- A reasoning agent performs aggregation, counting, ranking, comparison, multi-hop reasoning, and evidence sufficiency validation before answer generation.
+- Redis-based semantic caching accelerates repeated and semantically similar queries while Redis-backed chat memory maintains conversational context.
+- The final response is generated only after query rewriting, hybrid retrieval, reranking, reasoning, evidence validation, and confidence estimation, with source citations for grounded answers.
+- The system includes an automated evaluation framework measuring retrieval quality (Recall@K, Precision@K, Hit Rate, MRR), generation quality (Faithfulness, Answer Relevancy, BERTScore), and end-to-end pipeline latency.
