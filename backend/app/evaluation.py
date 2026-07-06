@@ -32,7 +32,6 @@ import math
 import re
 import sys
 from collections import defaultdict
-from itertools import cycle
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -440,6 +439,43 @@ def _gen_comparative(chunk_a: Chunk, chunk_b: Chunk, retries: int | None = None)
 
 # ── Pool builder ──────────────────────────────────────────────────────────────
 
+def _fallback_answer(chunk_text: str, max_chars: int = 220) -> str:
+    """Create a short local reference answer when eval question generation is unavailable."""
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", chunk_text) if s.strip()]
+    answer = sentences[0] if sentences else chunk_text.strip()
+    answer = re.sub(r"\s+", " ", answer)
+    if len(answer) > max_chars:
+        answer = answer[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:") + "..."
+    return answer or "See the referenced document chunk."
+
+
+def _fallback_pool(all_chunks: list[Chunk], needed: int) -> list[_PoolItem]:
+    """Build deterministic retrieval-eval questions when the LLM provider is unavailable."""
+    fallback: list[_PoolItem] = []
+    seen: set[tuple[str, int, int]] = set()
+    for chunk in all_chunks:
+        key = (chunk.document, chunk.page, chunk.chunk_index)
+        if key in seen:
+            continue
+        seen.add(key)
+        question = (
+            f"What information is stated in {chunk.document} "
+            f"on page {chunk.page}, chunk {chunk.chunk_index}?"
+        )
+        fallback.append(
+            (
+                question,
+                chunk.document,
+                chunk.page,
+                "fallback",
+                _fallback_answer(chunk.text),
+            )
+        )
+        if len(fallback) >= needed:
+            break
+    return fallback
+
+
 def _build_pool(all_chunks: list[Chunk], n_pairs: int) -> list[_PoolItem]:
     """
     Build a verified, diverse question pool of size >= n_pairs.
@@ -470,6 +506,12 @@ def _build_pool(all_chunks: list[Chunk], n_pairs: int) -> list[_PoolItem]:
             "  [factual] %s p.%d → %d/%d verified",
             chunk.document, chunk.page, len(verified), len(candidates),
         )
+
+    if not raw:
+        logger.warning(
+            "No factual eval questions could be generated. Using deterministic fallback questions."
+        )
+        return _fallback_pool(all_chunks, n_pairs)
 
     # Pass 2: Graph/relational (generate + verify)
     for chunk in all_chunks:
@@ -519,65 +561,21 @@ def _build_pool(all_chunks: list[Chunk], n_pairs: int) -> list[_PoolItem]:
         len(raw), len(deduped), n_pairs,
     )
 
-    # Pass 4: Top-up (generate + verify with higher temperature)
+    # Pass 4: Local deterministic top-up. This avoids another wave of LLM
+    # timeouts when the provider is unavailable.
     if len(deduped) < n_pairs:
-        logger.info("Pool short (%d < %d). Top-up pass...", len(deduped), n_pairs)
-        chunk_cycle = cycle(all_chunks)
-        max_attempts = (n_pairs - len(deduped)) * 8
-        attempts = 0
-        settings = get_settings()
-        client = OpenAI(
-            base_url=settings.nvidia_base_url,
-            api_key=settings.nvidia_api_key,
-            timeout=settings.eval_llm_timeout_seconds,
-            max_retries=settings.eval_llm_max_retries,
+        needed = n_pairs - len(deduped)
+        logger.warning(
+            "Pool short (%d < %d). Using %d deterministic fallback question(s).",
+            len(deduped), n_pairs, needed,
         )
-        while len(deduped) < n_pairs and attempts < max_attempts:
-            chunk = next(chunk_cycle)
-            attempts += 1
-            try:
-                resp = client.chat.completions.create(
-                    model=settings.nvidia_model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are an evaluation question generator. "
-                                "Generate a question ONLY about facts in the provided text. "
-                                "Output a single question ending with '?'."
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": (
-                                "Generate ONE factual question whose answer is explicitly "
-                                "stated in this text. Ask about a different aspect than "
-                                "common questions (CEO names, founders):\n\n"
-                                f"TEXT:\n{chunk.text}\n\nQuestion:"
-                            ),
-                        },
-                    ],
-                    max_tokens=100,
-                    temperature=0.6,
-                )
-                q = (resp.choices[0].message.content or "").strip().strip('"\'')
-                if q and not q.endswith("?"):
-                    q += "?"
-                if q.endswith("?") and 10 < len(q) < 400:
-                    # Verify before adding
-                    answer = _verify_question(q, chunk.text)
-                    if answer is not None:
-                        candidate: _PoolItem = (
-                            q, chunk.document, chunk.page, "factual", answer
-                        )
-                        if all(
-                            _token_overlap(q, ex[0]) < _DEDUP_OVERLAP_THRESHOLD
-                            for ex in deduped
-                        ):
-                            deduped.append(candidate)
-                            logger.debug("  Top-up verified: %s", q[:60])
-            except Exception as exc:
-                logger.debug("Top-up attempt %d failed: %s", attempts, exc)
+        existing_questions = {item[0] for item in deduped}
+        for candidate in _fallback_pool(all_chunks, needed):
+            if candidate[0] not in existing_questions:
+                deduped.append(candidate)
+                existing_questions.add(candidate[0])
+            if len(deduped) >= n_pairs:
+                break
 
     return deduped[:n_pairs]
 

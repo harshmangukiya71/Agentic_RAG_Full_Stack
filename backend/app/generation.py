@@ -277,6 +277,8 @@ def generate_answer(
     client = OpenAI(
         base_url=settings.gemini_base_url,
         api_key=settings.gemini_api_key,
+        timeout=settings.llm_timeout_seconds,
+        max_retries=settings.llm_max_retries,
     )
 
     try:
@@ -349,7 +351,12 @@ def generate_llm_fallback(question: str, conversation_history: str = "") -> Quer
     The response is clearly labelled so the user knows it's not grounded in their docs.
     """
     settings = get_settings()
-    client = OpenAI(base_url=settings.gemini_base_url, api_key=settings.gemini_api_key)
+    client = OpenAI(
+        base_url=settings.gemini_base_url,
+        api_key=settings.gemini_api_key,
+        timeout=settings.llm_timeout_seconds,
+        max_retries=settings.llm_max_retries,
+    )
 
     logger.info("LLM fallback: answering '%s' from general knowledge", question[:80])
 

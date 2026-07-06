@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     nvidia_model: str = "meta/llama-3.3-70b-instruct"
     nvidia_max_tokens: int = 1024
     nvidia_temperature: float = 0.1
+    llm_timeout_seconds: float = 60.0
+    llm_max_retries: int = 0
     nvidia_embedding_model: str = "nvidia/nv-embedqa-e5-v5"
     nvidia_embedding_batch_size: int = 64
 
