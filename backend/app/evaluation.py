@@ -205,7 +205,10 @@ def _llm(
 ) -> str:
     settings = get_settings()
     client = OpenAI(
-        base_url=settings.nvidia_base_url, api_key=settings.nvidia_api_key
+        base_url=settings.nvidia_base_url,
+        api_key=settings.nvidia_api_key,
+        timeout=settings.eval_llm_timeout_seconds,
+        max_retries=settings.eval_llm_max_retries,
     )
     resp = client.chat.completions.create(
         model=settings.nvidia_model,
@@ -319,8 +322,10 @@ def _generate_and_verify(
 
 # ── Question generators ───────────────────────────────────────────────────────
 
-def _gen_factual(chunk_text: str, n: int, retries: int = 3) -> list[str]:
+def _gen_factual(chunk_text: str, n: int, retries: int | None = None) -> list[str]:
     """Generate up to n factual questions strictly from the chunk text."""
+    if retries is None:
+        retries = get_settings().eval_question_generation_retries
     system = (
         "You are an evaluation dataset generator for a RAG system. "
         "CRITICAL: Generate questions ONLY about facts explicitly stated in the "
@@ -354,12 +359,14 @@ def _gen_factual(chunk_text: str, n: int, retries: int = 3) -> list[str]:
 
 
 def _gen_graph(
-    chunk_text: str, entity_ids: list[str], n: int, retries: int = 2
+    chunk_text: str, entity_ids: list[str], n: int, retries: int | None = None
 ) -> list[str]:
     """
     Generate relationship questions for entity-rich chunks.
     Still constrained to excerpt-only facts.
     """
+    if retries is None:
+        retries = get_settings().eval_question_generation_retries
     if len(entity_ids) < 2:
         return []
     system = (
@@ -394,11 +401,13 @@ def _gen_graph(
     return []
 
 
-def _gen_comparative(chunk_a: Chunk, chunk_b: Chunk, retries: int = 2) -> list[str]:
+def _gen_comparative(chunk_a: Chunk, chunk_b: Chunk, retries: int | None = None) -> list[str]:
     """
     Generate one cross-chunk question requiring both excerpts.
     Only asks about facts present in both chunks.
     """
+    if retries is None:
+        retries = get_settings().eval_question_generation_retries
     system = (
         "You are an evaluation dataset generator. "
         "CRITICAL: Generate a question ONLY about facts explicitly stated in "
@@ -442,7 +451,7 @@ def _build_pool(all_chunks: list[Chunk], n_pairs: int) -> list[_PoolItem]:
     Pass 4 — Top-up:      round-robin fill if still short
     """
     n_chunks = max(len(all_chunks), 1)
-    factual_per_chunk = max(2, min(_MAX_FACTUAL_PER_CHUNK, math.ceil(n_pairs / n_chunks)))
+    factual_per_chunk = max(1, min(_MAX_FACTUAL_PER_CHUNK, math.ceil(n_pairs / n_chunks)))
     logger.info(
         "Pool builder: %d chunks, target %d, %d factual/chunk",
         n_chunks, n_pairs, factual_per_chunk,
@@ -452,9 +461,11 @@ def _build_pool(all_chunks: list[Chunk], n_pairs: int) -> list[_PoolItem]:
 
     # Pass 1: Factual (generate + verify)
     for chunk in all_chunks:
+        if len(raw) >= n_pairs:
+            break
         candidates = _gen_factual(chunk.text, factual_per_chunk)
         verified = _generate_and_verify(chunk, candidates, "factual")
-        raw.extend(verified)
+        raw.extend(verified[: max(0, n_pairs - len(raw))])
         logger.info(
             "  [factual] %s p.%d → %d/%d verified",
             chunk.document, chunk.page, len(verified), len(candidates),
@@ -462,10 +473,12 @@ def _build_pool(all_chunks: list[Chunk], n_pairs: int) -> list[_PoolItem]:
 
     # Pass 2: Graph/relational (generate + verify)
     for chunk in all_chunks:
+        if len(raw) >= n_pairs:
+            break
         if len(chunk.entities) >= 2:
             candidates = _gen_graph(chunk.text, chunk.entities, _MAX_GRAPH_PER_CHUNK)
             verified = _generate_and_verify(chunk, candidates, "relational")
-            raw.extend(verified)
+            raw.extend(verified[: max(0, n_pairs - len(raw))])
             if verified:
                 logger.info(
                     "  [graph] %s p.%d → %d/%d verified",
@@ -477,9 +490,13 @@ def _build_pool(all_chunks: list[Chunk], n_pairs: int) -> list[_PoolItem]:
     for chunk in all_chunks:
         by_doc[chunk.document].append(chunk)
     for doc_chunks in by_doc.values():
+        if len(raw) >= n_pairs:
+            break
         if len(doc_chunks) < 2:
             continue
         for i in range(min(3, len(doc_chunks) - 1)):
+            if len(raw) >= n_pairs:
+                break
             candidates = _gen_comparative(doc_chunks[i], doc_chunks[i + 1])
             # For comparative, verify against combined text of both chunks
             combined_text = doc_chunks[i].text + " " + doc_chunks[i + 1].text
@@ -487,7 +504,7 @@ def _build_pool(all_chunks: list[Chunk], n_pairs: int) -> list[_PoolItem]:
                 update={"text": combined_text}
             )
             verified = _generate_and_verify(combined_chunk, candidates, "comparative")
-            raw.extend(verified)
+            raw.extend(verified[: max(0, n_pairs - len(raw))])
             if verified:
                 logger.info(
                     "  [comparative] %s p.%d+p.%d → %d verified",
@@ -510,7 +527,10 @@ def _build_pool(all_chunks: list[Chunk], n_pairs: int) -> list[_PoolItem]:
         attempts = 0
         settings = get_settings()
         client = OpenAI(
-            base_url=settings.nvidia_base_url, api_key=settings.nvidia_api_key
+            base_url=settings.nvidia_base_url,
+            api_key=settings.nvidia_api_key,
+            timeout=settings.eval_llm_timeout_seconds,
+            max_retries=settings.eval_llm_max_retries,
         )
         while len(deduped) < n_pairs and attempts < max_attempts:
             chunk = next(chunk_cycle)

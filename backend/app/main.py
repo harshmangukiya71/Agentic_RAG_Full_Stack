@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 # Thread pool for running blocking LLM/evaluation calls without blocking the event loop
 _thread_pool = ThreadPoolExecutor(max_workers=2)
+_eval_lock = asyncio.Lock()
 
 
 async def _run_in_thread(fn, *args):
@@ -443,9 +444,15 @@ async def run_auto_evaluation(n_pairs: int = 10) -> EvalReport:
         )
 
     n_pairs = min(max(n_pairs, 3), 20)   # clamp to [3, 20]
+    if _eval_lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="Evaluation is already running. Wait for it to finish or restart the backend to stop the old run.",
+        )
     logger.info("Starting auto-evaluation with n_pairs=%d", n_pairs)
     try:
-        report = await _run_in_thread(auto_evaluate, pipeline, n_pairs)
+        async with _eval_lock:
+            report = await _run_in_thread(auto_evaluate, pipeline, n_pairs)
         logger.info(
             "Evaluation complete: %d/%d questions, Recall@3=%.1f%%",
             report.total_questions, n_pairs, report.recall_at_3 * 100,

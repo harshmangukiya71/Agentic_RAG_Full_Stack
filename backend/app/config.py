@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     max_retrieval_iterations: int = 3
     cache_load_monitoring: bool = True
     cache_ready_percent: int = 100
+    eval_llm_timeout_seconds: float = 30.0
+    eval_llm_max_retries: int = 0
+    eval_question_generation_retries: int = 1
 
     @field_validator("neo4j_uri")
     @classmethod
