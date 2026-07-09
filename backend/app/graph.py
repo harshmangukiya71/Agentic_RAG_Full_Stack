@@ -310,21 +310,23 @@ class Neo4jGraphStore:
         return relationship_count
 
     def search_entities(self, query: str, limit: int = 10) -> list[GraphEntity]:
-        query = _ENTITY_PREFIX_RE.sub("", re.sub(r"\s+", " ", query.strip())).strip()
-        if not query:
+        entity_query = _ENTITY_PREFIX_RE.sub("", re.sub(r"\s+", " ", query.strip())).strip()
+        if not entity_query:
             return []
         with self._driver.session(database=self._database) as session:
             rows = session.run(
                 """
                 MATCH (e:Entity)
-                WHERE toLower(e.name) CONTAINS toLower($query)
-                   OR any(alias IN coalesce(e.aliases, []) WHERE toLower(alias) CONTAINS toLower($query))
+                WHERE toLower(e.name) CONTAINS toLower($entity_query)
+                   OR any(alias IN coalesce(e.aliases, []) WHERE toLower(alias) CONTAINS toLower($entity_query))
                 RETURN e
                 ORDER BY e.confidence DESC
                 LIMIT $limit
                 """,
-                query=query,
-                limit=limit,
+                {
+                    "entity_query": entity_query,
+                    "limit": limit,
+                },
             )
             return [self._entity(record["e"]) for record in rows]
 
