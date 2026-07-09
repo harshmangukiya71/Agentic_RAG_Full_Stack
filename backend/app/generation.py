@@ -42,6 +42,27 @@ def _is_llm_capacity_error(exc: Exception) -> bool:
     )
 
 
+def _is_llm_transient_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    class_name = exc.__class__.__name__.lower()
+    return _is_llm_capacity_error(exc) or any(
+        marker in text or marker in class_name
+        for marker in (
+            "timeout",
+            "timed out",
+            "readtimeout",
+            "connecttimeout",
+            "connection error",
+            "connectionerror",
+            "temporarily unavailable",
+            "service unavailable",
+            "502",
+            "503",
+            "504",
+        )
+    )
+
+
 def _format_number(value) -> str:
     if isinstance(value, (int, float)):
         if float(value).is_integer():
@@ -126,6 +147,39 @@ def _deterministic_reasoning_answer(
     return None
 
 # ── System prompt (RAG mode) ─────────────────────────────────────────────────
+def _context_fallback_answer(
+    context_chunks: list[RetrievedChunk],
+    exc: Exception,
+) -> QueryResponse:
+    excerpts = []
+    for index, chunk in enumerate(context_chunks[:3], start=1):
+        text = re.sub(r"\s+", " ", chunk.chunk).strip()
+        if len(text) > 500:
+            text = text[:497].rstrip() + "..."
+        excerpts.append(
+            f"{index}. {text} "
+            f"({chunk.document}, page {chunk.page}, chunk {chunk.chunk_index})"
+        )
+
+    reason = (
+        "the LLM provider timed out"
+        if "timeout" in exc.__class__.__name__.lower() or "timed out" in str(exc).lower()
+        else "the LLM provider was temporarily unavailable"
+    )
+    return QueryResponse(
+        answer=(
+            f"I could not complete the final LLM generation step because {reason}. "
+            "Here is the most relevant retrieved document evidence instead:\n\n"
+            + "\n".join(excerpts)
+        ),
+        sources=_build_sources(context_chunks),
+        confidence=min(
+            0.45,
+            max((context_chunks[0].relevance_score if context_chunks else 0.0), 0.2),
+        ),
+    )
+
+
 _SYSTEM_PROMPT = """You are a helpful, precise document assistant. Your job is to answer questions
 based strictly on the provided document excerpts. Follow these rules:
 
@@ -294,14 +348,17 @@ def generate_answer(
         )
         raw_answer = response.choices[0].message.content or ""
     except Exception as exc:
-        logger.exception("Gemini API call failed: %s", exc)
+        if _is_llm_transient_error(exc):
+            logger.warning("Gemini API call unavailable; using fallback answer: %s", exc)
+        else:
+            logger.exception("Gemini API call failed: %s", exc)
         deterministic = _deterministic_reasoning_answer(
             reasoning_output, context_chunks
         )
         if deterministic:
-            if _is_llm_capacity_error(exc):
+            if _is_llm_transient_error(exc):
                 deterministic.answer += (
-                    "\n\nNote: the LLM provider is currently rate-limited, "
+                    "\n\nNote: the LLM provider is currently unavailable, "
                     "so this answer was generated from the local reasoning "
                     "extractor instead of the final LLM step."
                 )
@@ -316,6 +373,8 @@ def generate_answer(
                 sources=_build_sources(context_chunks),
                 confidence=0.0,
             )
+        if _is_llm_transient_error(exc):
+            return _context_fallback_answer(context_chunks, exc)
         raise
 
     # ── Step 4: Confidence scoring ────────────────────────────────────────
